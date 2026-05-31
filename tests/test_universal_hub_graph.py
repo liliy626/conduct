@@ -148,6 +148,14 @@ def test_visual_query_adds_image_artifact_to_required_outputs() -> None:
     assert determine_required_outputs("请画一张图", required).count("image_artifact") == 1
 
 
+def test_non_visual_followup_drops_stale_image_artifact_requirement() -> None:
+    from gateway_core.agents.universal_hub.supervisor_core import determine_required_outputs
+
+    required = determine_required_outputs("那上周呢？", ["data_evidence", "image_artifact"])
+
+    assert required == ["data_evidence"]
+
+
 def test_universal_hub_graph_dispatches_missing_output_to_registered_skill() -> None:
     from gateway_core.agents.universal_hub.graph_builder import compile_universal_hub_graph
 
@@ -295,3 +303,34 @@ def test_visual_query_runs_data_then_image_and_passes_sql_lineage() -> None:
     assert final_state["visited_skills"] == ["fake_data", "image_generator"]
     assert final_state["meta_context"]["executed_sql_lineage"][-1]["sql_hash"] == "a" * 64
     assert _ImageSkillNeedsLineage.seen_lineage[-1]["row_count"] == 11
+
+
+def test_non_visual_followup_does_not_dispatch_stale_image_artifact() -> None:
+    from gateway_core.agents.universal_hub.graph_builder import compile_universal_hub_graph
+
+    _ImageSkillNeedsLineage.seen_lineage = []
+    graph = compile_universal_hub_graph(skill_registry=_fake_multimodal_registry())
+
+    final_state = asyncio.run(
+        graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="那上周呢？")],
+                "session_context": {"school_id": "sch_test", "schema_name": "test_schema"},
+                "required_outputs": ["data_evidence", "image_artifact"],
+                "completed_outputs": [],
+                "evidence_refs": [],
+                "artifact_refs": [],
+                "visited_skills": [],
+                "skill_call_count": 0,
+                "max_skill_calls": 4,
+                "meta_context": {},
+                "multimodal_artifacts": {},
+            },
+            config={"configurable": {"runtime_ctx": RuntimeContext(runtime_marker="ctx-only")}},
+        )
+    )
+
+    assert final_state["required_outputs"] == ["data_evidence"]
+    assert final_state["completed_outputs"] == ["data_evidence"]
+    assert final_state["visited_skills"] == ["fake_data"]
+    assert _ImageSkillNeedsLineage.seen_lineage == []

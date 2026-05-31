@@ -39,7 +39,7 @@ class ImageGenerationSkill(BaseAgentSkill):
             yield SkillEvent(event_type="process", data={"text": "缺少已审计 SQL 证据，已跳过生图。"})
             return
 
-        evidence = lineages[-1]
+        evidence = _primary_sql_lineage(lineages)
         sql_hash = str(evidence.get("sql_hash") or "")
         if len(sql_hash) != 64:
             yield SkillEvent(event_type="process", data={"text": "SQL 证据哈希不完整，已跳过生图。"})
@@ -102,6 +102,27 @@ def _executed_sql_lineages(state: UniversalAgentState) -> list[dict[str, Any]]:
     return [item for item in lineages if isinstance(item, dict)]
 
 
+def _lineage_row_count(lineage: dict[str, Any]) -> int:
+    try:
+        return int(lineage.get("row_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _lineage_tables(lineage: dict[str, Any]) -> list[str]:
+    return [str(item).strip() for item in lineage.get("tables_used", []) if str(item).strip()]
+
+
+def _primary_sql_lineage(lineages: list[dict[str, Any]]) -> dict[str, Any]:
+    for lineage in reversed(lineages):
+        if _lineage_row_count(lineage) > 0 and _lineage_tables(lineage):
+            return lineage
+    for lineage in reversed(lineages):
+        if _lineage_row_count(lineage) > 0:
+            return lineage
+    return lineages[-1]
+
+
 def _generate_image(
     *,
     prompt: str,
@@ -124,11 +145,14 @@ def _generate_image(
         AgentToolInput(arguments={"prompt": prompt, "size": str(ctx.get("image_size") or "1024x1024")}),
         ToolExecutionContext(tenant_id=tenant_id, request_id=f"img_{sql_hash[:12]}"),
     )
-    if not output.ok:
-        return {"error": output.error or "image generation failed"}
-    for artifact in output.artifacts:
-        if isinstance(artifact, dict):
-            url = str(artifact.get("download_url") or artifact.get("image_url") or artifact.get("url") or "").strip()
-            if url:
-                return {"url": url}
-    return {"error": "image generation returned no artifact"}
+    try:
+        if not output.ok:
+            return {"error": output.error or "image generation failed"}
+        for artifact in output.artifacts:
+            if isinstance(artifact, dict):
+                url = str(artifact.get("download_url") or artifact.get("image_url") or artifact.get("url") or "").strip()
+                if url:
+                    return {"url": url}
+        return {"error": "image generation returned no artifact"}
+    finally:
+        del output

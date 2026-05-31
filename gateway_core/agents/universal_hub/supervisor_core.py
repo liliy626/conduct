@@ -25,7 +25,7 @@ def determine_required_outputs(user_query: str, current_outputs: list[str]) -> l
     itself to a SQL lineage hash.
     """
 
-    outputs = list(dict.fromkeys(current_outputs))
+    outputs = [output for output in dict.fromkeys(current_outputs) if output != "image_artifact"]
     query = str(user_query or "").strip().lower()
     if any(keyword in query for keyword in VISUAL_OUTPUT_KEYWORDS):
         if "data_evidence" not in outputs:

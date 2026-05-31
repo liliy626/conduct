@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import time
 from typing import AsyncIterator
@@ -63,6 +64,53 @@ def test_image_generation_skill_contract_and_lineage_lock() -> None:
     # 图片 URL 只能作为资产事件出现，不能写回对话历史，避免下一轮上下文污染。
     assert state["messages"] == [HumanMessage(content="把教师请假排行做成一张管理大屏图")]
     assert state["multimodal_artifacts"] == {}
+
+
+def test_image_generation_skill_prefers_non_empty_sql_lineage() -> None:
+    from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
+
+    non_empty_hash = "b" * 64
+    empty_hash = "c" * 64
+    state = {
+        "messages": [HumanMessage(content="把真正查出来的请假数据画成图")],
+        "session_context": {"school_id": "sch_zx_mlh", "schema_name": "zx_mlh"},
+        "required_outputs": ["image_artifact"],
+        "completed_outputs": ["data_evidence"],
+        "artifact_refs": [],
+        "multimodal_artifacts": {},
+        "meta_context": {
+            "executed_sql_lineage": [
+                {
+                    "sql_hash": non_empty_hash,
+                    "tables_used": ["zx_mlh.教师销假_请假明细"],
+                    "row_count": 73,
+                    "query_purpose": "教师请假排行",
+                },
+                {
+                    "sql_hash": empty_hash,
+                    "tables_used": ["zx_mlh.空配置表"],
+                    "row_count": 0,
+                    "query_purpose": "后置空探测",
+                },
+            ]
+        },
+    }
+
+    async def collect() -> list:
+        return [
+            event
+            async for event in ImageGenerationSkill().astream(
+                state,
+                ctx={"image_latency_sec": 0, "image_mock_mode": True},
+            )
+        ]
+
+    events = asyncio.run(collect())
+    payload = events[-1].data["payload"]
+
+    assert payload["linked_sql_hash"] == non_empty_hash
+    assert "73 real-time data records" in payload["prompt_used"]
+    assert "zx_mlh.教师销假_请假明细" in payload["prompt_used"]
 
 
 def test_image_artifact_event_streams_markdown_and_sources() -> None:
@@ -302,3 +350,38 @@ def test_image_generation_skill_passes_triple_axis_prompt_to_openai(tmp_path, mo
     assert "student behavior discipline" in prompt
     assert "11 real-time data records" in prompt
     assert "SQL Hash: a1d11461f1ed" in prompt
+
+
+def test_generate_image_releases_tool_output_after_url(monkeypatch) -> None:
+    import gateway_core.agents.visual.image_generation_skill as image_generation_skill
+
+    released = {"value": False}
+
+    class _LargeOutput:
+        ok = True
+        artifacts = [{"url": "https://cdn.example.test/image.png"}]
+        error = ""
+        payload = "x" * 1_000_000
+
+        def __del__(self) -> None:
+            released["value"] = True
+
+    class _FakeImageTool:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def run(self, *_args, **_kwargs) -> _LargeOutput:
+            return _LargeOutput()
+
+    monkeypatch.setattr(image_generation_skill, "ImageTool", _FakeImageTool)
+
+    result = image_generation_skill._generate_image(
+        prompt="prompt",
+        sql_hash=SQL_HASH,
+        state={"session_context": {"school_id": "sch_zx_mlh"}},
+        ctx={},
+    )
+    gc.collect()
+
+    assert result == {"url": "https://cdn.example.test/image.png"}
+    assert released["value"] is True

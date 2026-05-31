@@ -46,6 +46,19 @@ def _text_from_event(event: SkillEvent) -> str:
 def _latest_user_text(state: UniversalAgentState) -> str:
     messages = list(state.get("messages", []))
     for message in reversed(messages):
+        role = str(getattr(message, "type", "") or getattr(message, "role", "") or "").lower()
+        if role in {"human", "user"}:
+            content = getattr(message, "content", None)
+            return str(content or "")
+        if isinstance(message, (tuple, list)) and len(message) >= 2:
+            role = str(message[0]).lower()
+            if role in {"human", "user"}:
+                return str(message[1])
+        if isinstance(message, dict):
+            role = str(message.get("role") or message.get("type") or "").lower()
+            if role in {"human", "user"}:
+                return str(message.get("content") or "")
+    for message in reversed(messages):
         content = getattr(message, "content", None)
         if content is not None:
             return str(content)
