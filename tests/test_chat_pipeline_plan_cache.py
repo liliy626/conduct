@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
+
 
 def test_canonical_plan_cache_key_includes_tenant_id() -> None:
     from gateway_core.api.openai_compat.chat_pipeline import _canonical_plan_cache_key
@@ -120,3 +122,37 @@ def test_canonical_plan_cache_reports_remaining_multimodal_outputs() -> None:
         )
         == []
     )
+
+
+def test_canonical_plan_lineage_rejects_cross_tenant_handoff() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    result = {
+        "lineage_ledger": [
+            {
+                "sql_hash": "a" * 64,
+                "meta_context": {"tenant_id": "sch_a"},
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="tenant mismatch"):
+        chat_pipeline._canonical_plan_lineage_ledger_for_tenant(
+            result,
+            {"school_id": "sch_b"},
+        )
+
+
+def test_canonical_plan_lineage_accepts_matching_tenant_handoff() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    lineage = {
+        "sql_hash": "a" * 64,
+        "meta_context": {"tenant_id": "sch_a"},
+    }
+    result = {"lineage_ledger": [lineage]}
+
+    assert chat_pipeline._canonical_plan_lineage_ledger_for_tenant(
+        result,
+        {"school_id": "sch_a"},
+    ) == [lineage]

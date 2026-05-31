@@ -162,12 +162,14 @@ def test_image_generation_skill_rejects_untrusted_artifact_url() -> None:
         },
     }
 
+    ctx = {"image_latency_sec": 0, "image_url_factory": lambda _hash: "https://evil.example.test/img.png"}
+
     async def collect() -> list:
         return [
             event
             async for event in ImageGenerationSkill().astream(
                 state,
-                ctx={"image_latency_sec": 0, "image_url_factory": lambda _hash: "https://evil.example.test/img.png"},
+                ctx=ctx,
             )
         ]
 
@@ -175,6 +177,13 @@ def test_image_generation_skill_rejects_untrusted_artifact_url() -> None:
 
     assert [event.event_type for event in events] == ["process", "process", "process"]
     assert "不在允许域名" in events[-1].data["text"]
+    assert ctx["multimodal_errors"] == [
+        {
+            "artifact_type": "image_artifact",
+            "code": "image_artifact_validation_error",
+            "message": events[-1].data["text"].strip().removeprefix("生图失败："),
+        }
+    ]
 
 
 def test_image_generation_skill_prefers_non_empty_sql_lineage() -> None:
@@ -658,12 +667,14 @@ def test_image_generation_skill_timeout_does_not_block_graph(monkeypatch) -> Non
         },
     }
 
+    ctx = {"image_latency_sec": 0, "image_timeout_sec": 0.01}
+
     async def collect() -> list:
         return [
             event
             async for event in ImageGenerationSkill().astream(
                 state,
-                ctx={"image_latency_sec": 0, "image_timeout_sec": 0.01},
+                ctx=ctx,
             )
         ]
 
@@ -672,6 +683,13 @@ def test_image_generation_skill_timeout_does_not_block_graph(monkeypatch) -> Non
     assert events[-1].event_type == "process"
     assert "生图失败" in events[-1].data["text"]
     assert "超时" in events[-1].data["text"]
+    assert ctx["multimodal_errors"] == [
+        {
+            "artifact_type": "image_artifact",
+            "code": "image_generation_timeout",
+            "message": events[-1].data["text"].strip(),
+        }
+    ]
 
 
 def test_triple_axis_prompt_synthesizer_aligns_style_entity_and_data() -> None:

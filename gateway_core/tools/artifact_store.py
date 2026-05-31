@@ -40,6 +40,8 @@ def artifact_download_url(path: str | Path) -> str:
     rel = artifact_relative_path(path)
     base = os.getenv("GATEWAY_PUBLIC_BASE_URL", "").strip().rstrip("/")
     url_path = f"/v1/artifacts/{quote(rel, safe='/')}"
+    if base and urlparse(base).scheme != "https":
+        return url_path
     return f"{base}{url_path}" if base else url_path
 
 

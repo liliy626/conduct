@@ -560,6 +560,20 @@ def _canonical_plan_remaining_outputs(plan: dict[str, Any], question: str) -> li
     return [output for output in requested_outputs if output not in completed_outputs]
 
 
+def _canonical_plan_lineage_ledger_for_tenant(
+    result: dict[str, Any],
+    session_context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    tenant_id = QueryNormalizer.extract_tenant_id(session_context)
+    lineages = [item for item in result.get("lineage_ledger") or [] if isinstance(item, dict)]
+    for lineage in lineages:
+        meta_context = lineage.get("meta_context") if isinstance(lineage.get("meta_context"), dict) else {}
+        lineage_tenant_id = QueryNormalizer.extract_tenant_id(meta_context)
+        if lineage_tenant_id != tenant_id:
+            raise ValueError("canonical plan lineage tenant mismatch")
+    return lineages
+
+
 async def _stream_canonical_plan_cache(
     *,
     plan: dict[str, Any],
@@ -595,6 +609,7 @@ async def _stream_canonical_plan_cache(
             session_context=session_context,
             user_query=user_query,
         )
+        _canonical_plan_lineage_ledger_for_tenant(result, session_context)
         text = str(result.get("text") or "")
         sources = result.get("sources") if isinstance(result.get("sources"), list) else []
         if text:
@@ -692,6 +707,7 @@ async def _stream_canonical_plan_cache_then_hub(
             session_context=session_context,
             user_query=user_query,
         )
+        lineage_ledger = _canonical_plan_lineage_ledger_for_tenant(result, session_context)
         text = str(result.get("text") or "")
         sources = result.get("sources") if isinstance(result.get("sources"), list) else []
         if text:
@@ -724,7 +740,7 @@ async def _stream_canonical_plan_cache_then_hub(
             "visited_skills": list(result.get("visited_skills") or ["canonical_plan_cache"]),
             "meta_context": {
                 **dict(state.get("meta_context") or {}),
-                "executed_sql_lineage": list(result.get("lineage_ledger") or []),
+                "executed_sql_lineage": lineage_ledger,
             },
         }
         async for chunk in _stream_experimental_shadow_hub(
@@ -756,6 +772,8 @@ async def _stream_canonical_plan_cache_then_hub(
             stream_done=True,
         )
         yield runtime_response_fns.stream_end(setup.spec.model_id, setup.completion_id)
+
+
 async def _execute_canonical_plan_cache(
     *,
     plan: dict[str, Any],

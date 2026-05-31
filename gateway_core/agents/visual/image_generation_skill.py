@@ -70,19 +70,46 @@ class ImageGenerationSkill(BaseMultimodalAgentSkill):
                 timeout=_image_timeout_sec(ctx),
             )
         except TimeoutError:
-            yield SkillEvent(event_type="process", data={"text": "生图失败：图像生成超时，已释放后续多模态任务继续执行。\n"})
+            message = "生图失败：图像生成超时，已释放后续多模态任务继续执行。"
+            _record_multimodal_error(
+                ctx,
+                artifact_type="image_artifact",
+                code="image_generation_timeout",
+                message=message,
+            )
+            yield SkillEvent(event_type="process", data={"text": f"{message}\n"})
             return
         if image_result.get("error"):
-            yield SkillEvent(event_type="process", data={"text": f"生图失败：{image_result['error']}\n"})
+            message = f"生图失败：{image_result['error']}"
+            _record_multimodal_error(
+                ctx,
+                artifact_type="image_artifact",
+                code=_image_error_code(str(image_result["error"])),
+                message=str(image_result["error"]),
+            )
+            yield SkillEvent(event_type="process", data={"text": f"{message}\n"})
             return
 
         try:
             cdn_url = validate_external_artifact_url(str(image_result.get("url") or ""))
         except ValueError as exc:
+            _record_multimodal_error(
+                ctx,
+                artifact_type="image_artifact",
+                code="image_artifact_validation_error",
+                message=str(exc),
+            )
             yield SkillEvent(event_type="process", data={"text": f"生图失败：{exc}\n"})
             return
         if not cdn_url:
-            yield SkillEvent(event_type="process", data={"text": "生图工具未返回可展示图片地址。\n"})
+            message = "生图工具未返回可展示图片地址。"
+            _record_multimodal_error(
+                ctx,
+                artifact_type="image_artifact",
+                code="image_generation_missing_url",
+                message=message,
+            )
+            yield SkillEvent(event_type="process", data={"text": f"{message}\n"})
             return
         image_md5_proof = hashlib.md5(cdn_url.encode("utf-8")).hexdigest()
 
@@ -136,6 +163,32 @@ def _primary_sql_lineage(lineages: list[dict[str, Any]]) -> dict[str, Any]:
     return next(reversed(lineages))
 
 
+def _record_multimodal_error(
+    ctx: RuntimeContext | dict[str, Any],
+    *,
+    artifact_type: str,
+    code: str,
+    message: str,
+) -> None:
+    if not isinstance(ctx, dict):
+        return
+    errors = ctx.setdefault("multimodal_errors", [])
+    if isinstance(errors, list):
+        errors.append(
+            {
+                "artifact_type": artifact_type,
+                "code": code,
+                "message": message,
+            }
+        )
+
+
+def _image_error_code(message: str) -> str:
+    if "artifact URL" in message or "允许域名" in message:
+        return "image_artifact_validation_error"
+    return "image_generation_error"
+
+
 def _generate_image(
     *,
     prompt: str,
@@ -168,7 +221,10 @@ def _generate_image(
             if isinstance(artifact, dict):
                 url = str(artifact.get("download_url") or artifact.get("image_url") or artifact.get("url") or "").strip()
                 if url:
-                    return {"url": validate_external_artifact_url(url)}
+                    try:
+                        return {"url": validate_external_artifact_url(url)}
+                    except ValueError as exc:
+                        return {"error": str(exc)}
         return {"error": "image generation returned no artifact"}
     finally:
         del output
