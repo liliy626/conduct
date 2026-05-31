@@ -17,6 +17,7 @@
 
 - `base_skill.py`：Skill 基类与运行时上下文约定。
 - `school_sql/`：学校 SQL 专家。
+- `ppt/`：PPT 多模态输出专家。
 - `universal_hub/`：两节点中台图。
 - `visual/`：多模态生图专家。
 

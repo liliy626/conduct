@@ -79,5 +79,6 @@ def _proof_key_for_artifact_type(artifact_type: str) -> str:
     return {
         "image_artifact": "image_md5_proof",
         "pdf_artifact": "pdf_sha256",
+        "ppt_artifact": "ppt_sha256",
         "table_artifact": "table_hash",
     }.get(str(artifact_type or ""), "")

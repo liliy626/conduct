@@ -56,13 +56,17 @@ class RequiredOutputRule:
     outputs: tuple[str, ...]
 
 
-MULTIMODAL_TEMPORARY_SLOTS = frozenset({"image_artifact"})
+MULTIMODAL_TEMPORARY_SLOTS = frozenset({"image_artifact", "ppt_artifact"})
 TEMPORARY_OUTPUT_SLOTS = MULTIMODAL_TEMPORARY_SLOTS
 
 REQUIRED_OUTPUT_RULES = (
     RequiredOutputRule(
         keywords=VISUAL_INTENT_KEYWORDS,
         outputs=("data_evidence", "image_artifact"),
+    ),
+    RequiredOutputRule(
+        keywords=("ppt", "幻灯片", "演示文稿", "汇报 PPT", "汇报PPT"),
+        outputs=("data_evidence", "ppt_artifact"),
     ),
 )
 
@@ -210,15 +214,53 @@ def render_table_sources(payload: dict) -> list[dict]:
     ]
 
 
+def render_ppt_markdown(payload: dict) -> str:
+    title = str(payload.get("ppt_title") or payload.get("title") or payload.get("artifact_id") or "智能汇报 PPT")
+    page_count = str(payload.get("page_count") or 0)
+    cdn_url = str(payload.get("cdn_url") or "")
+    render_engine = str(payload.get("render_engine") or "PPT 生成组件")
+    pages = payload.get("pages_preview") if isinstance(payload.get("pages_preview"), list) else []
+    lines = [
+        "\n\n### **[智能汇报 PPT 已生成]**",
+        f"- **主题**: {title}",
+        f"- **渲染引擎**: {render_engine}",
+        f"- **总页数**: {page_count} 页",
+    ]
+    if cdn_url:
+        lines.append(f"- **下载地址**: [点击下载汇报 PPT]({cdn_url})")
+    if pages:
+        lines.append("\n**结构高光大纲**:")
+    for index, page in enumerate(pages[:3], 1):
+        if isinstance(page, dict):
+            slide_title = str(page.get("slide_title") or f"第 {index} 页")
+            slide_summary = str(page.get("slide_summary") or "").strip()
+            lines.append(f"{index}. **{slide_title}**: {slide_summary}")
+    return "\n".join(lines) + "\n"
+
+
+def render_ppt_sources(payload: dict) -> list[dict]:
+    ppt_sha256 = str(payload.get("ppt_sha256") or "")
+    title = str(payload.get("ppt_title") or payload.get("title") or payload.get("artifact_id") or "汇报演示文稿")
+    return [
+        {
+            "source": {"name": f"汇报演示文稿：{title}", "url": str(payload.get("cdn_url") or "")},
+            "document": [f"PPT 资产绑定 SHA-256: {ppt_sha256[:12]}"],
+            "metadata": [{"type": "ppt_artifact", "ppt_sha256": ppt_sha256, "artifact_id": str(payload.get("artifact_id") or "")}],
+        }
+    ]
+
+
 OUTPUT_RENDER_MATRIX = {
     "image_artifact": render_image_markdown,
     "pdf_artifact": render_pdf_citation,
+    "ppt_artifact": render_ppt_markdown,
     "table_artifact": render_table_snapshot,
 }
 
 OUTPUT_SOURCE_MATRIX = {
     "image_artifact": render_image_sources,
     "pdf_artifact": render_pdf_sources,
+    "ppt_artifact": render_ppt_sources,
     "table_artifact": render_table_sources,
 }
 

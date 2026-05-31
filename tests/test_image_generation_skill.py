@@ -60,6 +60,41 @@ def test_base_multimodal_skill_emits_contract_event_and_proof_key() -> None:
     assert event.data["payload"]["file_name"] == "教师考勤管理办法.pdf"
 
 
+def test_base_multimodal_skill_emits_ppt_proof_key() -> None:
+    from gateway_core.agents.base_skill import BaseMultimodalAgentSkill
+    from gateway_core.agents.universal_hub.models import MultimodalOutputContract
+
+    ppt_hash = "s" * 64
+
+    class _PptSkill(BaseMultimodalAgentSkill):
+        @property
+        def name(self) -> str:
+            return "ppt_generator"
+
+        @property
+        def provided_outputs(self) -> frozenset[str]:
+            return frozenset({"ppt_artifact"})
+
+        async def _execute_multimodal_core(self, state, ctx) -> MultimodalOutputContract:
+            return MultimodalOutputContract(
+                artifact_type="ppt_artifact",
+                artifact_id="ppt_report_001",
+                cdn_url="https://cdn.example.test/report.pptx",
+                crypto_proof=ppt_hash,
+                meta_payload={"title": "校园假勤审计报告", "page_count": 12},
+            )
+
+    async def collect() -> list:
+        return [event async for event in _PptSkill().astream({}, {})]
+
+    event = asyncio.run(collect())[0]
+    assert event.event_type == "evidence_completed"
+    assert event.data["type"] == "ppt_artifact"
+    assert event.data["payload"]["artifact_id"] == "ppt_report_001"
+    assert event.data["payload"]["ppt_sha256"] == ppt_hash
+    assert event.data["payload"]["title"] == "校园假勤审计报告"
+
+
 def test_image_generation_skill_contract_and_lineage_lock() -> None:
     from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
 
@@ -361,6 +396,53 @@ def test_adapter_renders_pdf_and_table_artifacts_from_output_matrices() -> None:
     assert "| 张三 | 3 |" in content
     assert any(source["metadata"][0].get("pdf_sha256") == "p" * 64 for source in sources)
     assert any(source["metadata"][0].get("table_hash") == "t" * 64 for source in sources)
+
+
+def test_adapter_renders_ppt_artifact_from_output_matrices() -> None:
+    from gateway_core.agents.universal_hub.models import SkillEvent
+    from gateway_core.api.openai_compat.adapter import UniversalHubStreamAdapter
+
+    ppt_hash = "s" * 64
+
+    async def stream() -> AsyncIterator[SkillEvent]:
+        yield SkillEvent(
+            event_type="evidence_completed",
+            data={
+                "type": "ppt_artifact",
+                "payload": {
+                    "artifact_id": "ppt_report_001",
+                    "cdn_url": "https://cdn.example.test/report.pptx",
+                    "ppt_sha256": ppt_hash,
+                    "title": "校园假勤审计报告",
+                    "page_count": 12,
+                    "pages_preview": [
+                        {"slide_title": "行政摘要", "slide_summary": "假勤趋势与行规风险总览"},
+                        {"slide_title": "核心血缘", "slide_summary": "绑定已审计 SQL 与多模态资产"},
+                    ],
+                },
+            },
+        )
+
+    async def collect() -> list[dict]:
+        chunks = [
+            chunk
+            async for chunk in UniversalHubStreamAdapter.to_openai_sse(
+                stream(),
+                model_id="yili-model",
+                completion_id="chatcmpl-ppt-test",
+                include_done=False,
+            )
+        ]
+        return _json_chunks(chunks)
+
+    payloads = asyncio.run(collect())
+    content = "".join(str(payload["choices"][0]["delta"].get("content", "")) for payload in payloads)
+    sources = [source for payload in payloads for source in payload.get("sources", [])]
+
+    assert "智能汇报 PPT 已生成" in content
+    assert "校园假勤审计报告" in content
+    assert "https://cdn.example.test/report.pptx" in content
+    assert any(source["metadata"][0].get("ppt_sha256") == ppt_hash for source in sources)
 
 
 def test_stream_adapter_releases_event_payload_with_finally() -> None:
@@ -681,3 +763,85 @@ def test_generate_image_releases_tool_output_after_url(monkeypatch) -> None:
 
     assert result == {"url": "https://cdn.example.test/image.png"}
     assert released["value"] is True
+
+
+def test_ppt_generation_skill_uses_multimodal_contract_and_registered_route() -> None:
+    from gateway_core.agents.ppt.ppt_generation_skill import PptGenerationSkill
+    from gateway_core.agents.universal_hub.registry import mandatory_candidate_skill_names
+
+    async def collect() -> list:
+        return [
+            event
+            async for event in PptGenerationSkill().astream(
+                {"messages": [], "session_context": {"school_id": "sch_zx_mlh"}},
+                ctx={"ppt_latency_sec": 0, "ppt_mock_url": "https://cdn.example.test/report.pptx"},
+            )
+        ]
+
+    events = asyncio.run(collect())
+    payload = events[-1].data["payload"]
+
+    assert "ppt_artifact" in PptGenerationSkill().provided_outputs
+    assert mandatory_candidate_skill_names(frozenset({"ppt_artifact"}), frozenset()) == ["ppt_generator"]
+    assert [event.event_type for event in events] == ["process", "evidence_completed"]
+    assert events[-1].data["type"] == "ppt_artifact"
+    assert payload["ppt_sha256"] == __import__("hashlib").sha256(payload["cdn_url"].encode("utf-8")).hexdigest()
+    assert payload["title"] == "2026校园假勤与行规数据深度审计报告"
+
+
+def test_ppt_generation_skill_uses_injected_bailian_provider_without_naked_event() -> None:
+    from gateway_core.agents.ppt.ppt_generation_skill import PptGenerationSkill
+
+    calls = []
+
+    async def bailian_call(payload: dict) -> dict:
+        calls.append(payload)
+        return {
+            "download_url": "https://cdn.example.test/bailian/report.pptx",
+            "ppt_title": "2026年美兰湖中学【教师请假排行】深层数据审计汇报文稿",
+            "page_count": 9,
+            "pages_preview": [{"slide_title": "行政摘要", "slide_summary": "教师请假排行总览"}],
+        }
+
+    state = {
+        "messages": [HumanMessage(content="生成一份汇报 PPT")],
+        "session_context": {"school_id": "sch_zx_mlh"},
+        "meta_context": {
+            "executed_sql_lineage": [
+                {
+                    "sql_hash": SQL_HASH,
+                    "tables_used": ["zx_mlh.教师销假_请假明细"],
+                    "row_count": 20,
+                    "query_purpose": "教师请假排行",
+                }
+            ]
+        },
+    }
+
+    async def collect() -> list:
+        return [
+            event
+            async for event in PptGenerationSkill().astream(
+                state,
+                ctx={"ppt_latency_sec": 0, "bailian_ppt_call": bailian_call},
+            )
+        ]
+
+    events = asyncio.run(collect())
+    payload = events[-1].data["payload"]
+
+    assert calls[0]["purpose"] == "教师请假排行"
+    assert calls[0]["school_id"] == "sch_zx_mlh"
+    assert payload["cdn_url"] == "https://cdn.example.test/bailian/report.pptx"
+    assert payload["title"] == "2026年美兰湖中学【教师请假排行】深层数据审计汇报文稿"
+    assert payload["render_engine"] == "阿里云百炼大模型演示文稿组件"
+    assert payload["ppt_sha256"] == __import__("hashlib").sha256(payload["cdn_url"].encode("utf-8")).hexdigest()
+
+
+def test_ppt_generation_skill_has_no_naked_evidence_completed_dict() -> None:
+    import gateway_core.agents.ppt.ppt_generation_skill as ppt_generation_skill
+
+    source = inspect.getsource(ppt_generation_skill)
+
+    assert 'event_type="evidence_completed"' not in source
+    assert "MultimodalOutputContract" in source

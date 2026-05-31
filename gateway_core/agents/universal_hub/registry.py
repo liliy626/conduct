@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from gateway_core.agents.chat.chat_skill import ChatSkill
 from gateway_core.agents.policy_only.policy_skill import PolicySkill
+from gateway_core.agents.ppt.ppt_generation_skill import PptGenerationSkill
 from gateway_core.agents.school_sql.school_sql_skill import SchoolSqlSkill
 from gateway_core.agents.universal_hub.models import SkillSpec
 from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
@@ -39,6 +40,14 @@ SKILL_REGISTRY: dict[str, SkillSpec] = {
         tools=frozenset({"image_generation"}),
         supports_stream=True,
         default_model_role="visual_agent",
+    ),
+    "ppt_generator": SkillSpec(
+        name="ppt_generator",
+        skill_cls=PptGenerationSkill,
+        outputs=frozenset({"ppt_artifact"}),
+        tools=frozenset({"ppt_generation"}),
+        supports_stream=True,
+        default_model_role="presentation_agent",
     ),
 }
 
