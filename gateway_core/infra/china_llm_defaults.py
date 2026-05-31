@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any, Dict
 
-DEFAULT_CHINA_EMBED_MODEL = "embedding-2"
-DEFAULT_CHINA_EMBED_API_KEY_ENV = "GLM_API_KEY"
-DEFAULT_CHINA_EMBED_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-DEFAULT_CHINA_EMBED_DIM = 1024
+import yaml
+
+
+def _model_config_path() -> Path:
+    return Path(os.getenv("MODEL_CONFIG_PATH", Path(__file__).resolve().parents[2] / "model_config.yaml"))
+
+
+def _load_china_embedding_defaults() -> dict[str, Any]:
+    raw = yaml.safe_load(_model_config_path().read_text(encoding="utf-8")) or {}
+    values = ((raw.get("embedding_defaults") or {}).get("china") or {})
+    return {
+        "model": str(values["model"]).strip(),
+        "api_key_env": str(values["api_key_env"]).strip(),
+        "base_url": str(values["base_url"]).strip().rstrip("/"),
+        "dimensions": int(values["dimensions"]),
+    }
+
+
+_CHINA_EMBEDDING_DEFAULTS = _load_china_embedding_defaults()
+
+DEFAULT_CHINA_EMBED_MODEL = _CHINA_EMBEDDING_DEFAULTS["model"]
+DEFAULT_CHINA_EMBED_API_KEY_ENV = _CHINA_EMBEDDING_DEFAULTS["api_key_env"]
+DEFAULT_CHINA_EMBED_BASE_URL = _CHINA_EMBEDDING_DEFAULTS["base_url"]
+DEFAULT_CHINA_EMBED_DIM = _CHINA_EMBEDDING_DEFAULTS["dimensions"]
 
 
 def _is_bigmodel_base_url(base_url: str) -> bool:

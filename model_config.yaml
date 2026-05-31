@@ -1,5 +1,12 @@
 default_model: yili-model
 
+embedding_defaults:
+  china:
+    model: embedding-3
+    api_key_env: GLM_API_KEY
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    dimensions: 1024
+
 models:
   - id: yili-model
     provider: deepseek

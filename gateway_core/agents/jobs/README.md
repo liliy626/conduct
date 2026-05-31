@@ -1,67 +1,34 @@
-# Agent 异步任务
+# gateway_core.agents.jobs
 
-异步 Agent 任务模块，负责把长耗时问答从 HTTP 请求生命周期里拆出来。
+## 1. 目录职责
 
-## 运行形态
+- 异步 Agent 任务、Redis Stream、任务状态存储和 SSE 事件服务。
 
-```text
-POST /v1/agent/jobs
--> PostgreSQL platform.agent_jobs
--> Redis Stream agent_jobs:queue
--> scripts/run_agent_worker.py
--> 内部调用 /v1/chat/completions stream=true
--> Redis Stream agent_job:{job_id}:events
--> GET /v1/agent/jobs/{job_id}/events
-```
+## 2. 输入
 
-主问答链路仍然是现有 `/v1/chat/completions`。worker 只是复用它，并把上游
-OpenAI 兼容 SSE token 增量转换成 job 事件：
+- 后台任务请求、Redis stream 消息、任务配置。
 
-- `job_queued`
-- `job_started`
-- `answer_delta`
-- `upstream_done`
-- `job_succeeded`
-- `job_failed`
-- `job_cancelled`
+## 3. 输出
 
-## 必填环境变量
+- 任务状态、事件流、worker 执行结果。
 
-```bash
-AGENT_JOB_QUEUE_ENABLED=1
-REDIS_URL=redis://127.0.0.1:6379/0
-POSTGRES_DSN=postgresql://user:pass@127.0.0.1:5432/yili
-AGENT_JOB_GATEWAY_BASE_URL=http://127.0.0.1:8008
-AGENT_JOB_QUEUE_STREAM=agent_jobs:queue
-AGENT_JOB_WORKER_GROUP=gateway_workers
-AGENT_JOB_MAX_CONCURRENCY=200
-```
+## 4. 核心文件
 
-异步任务默认也使用 `POSTGRES_DSN`。`AGENT_JOB_POSTGRES_DSN` 和 `MEILANHU_POSTGRES_DSN` 只作为旧配置兼容或特殊拆库时的覆盖项。
+- `service.py`：任务服务。
+- `worker.py`：后台 worker。
+- `redis_streams.py`：Redis stream 读写。
+- `sse.py`：任务事件 SSE。
 
-## 本地一键启动
+## 5. 数据流
 
-本地测试可以使用：
+- HTTP/调度创建 job，写入 store/stream，worker 消费并把事件推给 SSE 客户端。
 
-```bash
-bash scripts/start_async_gateway.sh
-```
+## 6. 不负责什么（Boundary）
 
-脚本会完成：
+- 不实现具体学校问答逻辑。
+- 不替代主 `/v1/chat/completions` 同步链路。
 
-- 读取 `.env`
-- 如果本机有 Docker，则启动名为 `yili-redis-local` 的本地 Redis 容器
-- 在 `127.0.0.1:8008` 启动网关
-- 启动 `scripts/run_agent_worker.py`
+## 7. 修改这里时的注意事项
 
-如果希望一个 worker 进程并行处理多个学校/问题：
-
-```bash
-AGENT_JOB_MAX_CONCURRENCY=200 bash scripts/start_async_gateway.sh
-```
-
-停止命令：
-
-```bash
-bash scripts/stop_async_gateway.sh
-```
+- 改 Redis key/stream 名称时要兼顾 worker 与 endpoint。
+- 任务 payload 只能放可序列化对象。

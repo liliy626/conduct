@@ -1,20 +1,34 @@
 # gateway_core.runtime
 
-运行时层负责网关装配、配置加载、HTTP 请求预处理和管理端点。
+## 1. 目录职责
 
-## 目录职责
+- 运行时装配层：模型配置、鉴权上下文、请求缓存、RAG embedding 和 trace context。
 
-| 文件 | 说明 |
-|---|---|
-| `gateway_runtime.py` | 运行时主装配（模型、数据库、路由执行协同） |
-| `gateway_config.py` | 模型与网关配置加载与校验 |
-| `runtime_context.py` | 兼容导出层，向旧调用方暴露统一入口 |
-| `request_handler.py` | 请求预处理（认证、模型路由等） |
-| `admin_endpoints.py` | 管理端接口（health/reload/monitor/school-traces） |
+## 2. 输入
 
-## 运维接口
+- `model_config.yaml`、环境变量、HTTP 请求、API key、模型调用参数。
 
-- `GET /health`
-- `POST /admin/reload-config`
-- `GET /v1/admin/recent-question-monitor`
-- `GET /v1/admin/school-traces/ui`
+## 3. 输出
+
+- 模型客户端、请求上下文、运行时单例、usage/trace context。
+
+## 4. 核心文件
+
+- `gateway_config.py`：模型配置和客户端工厂。
+- `gateway_runtime.py`：运行时导出和单例。
+- `runtime_rag_embedding.py`：RAG embedding。
+- `runtime_trace_context.py`：trace/usage contextvars。
+
+## 5. 数据流
+
+- API 层请求进入 runtime，解析模型/鉴权/缓存，再把 ctx 交给 Agent。
+
+## 6. 不负责什么（Boundary）
+
+- 不写业务 SQL。
+- 不处理具体工具输出格式。
+
+## 7. 修改这里时的注意事项
+
+- 新增环境开关优先封装为配置读取器。
+- 不要在业务层散落 `os.getenv`。
