@@ -86,3 +86,37 @@ def test_canonical_plan_cache_hits_only_matching_tenant(monkeypatch) -> None:
     )
 
     assert plan == {"title": "tenant b plan"}
+
+
+def test_canonical_plan_cache_still_matches_when_multimodal_requirements_exist(monkeypatch) -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    monkeypatch.setattr(chat_pipeline.rt, "_truthy_env", lambda *_args, **_kwargs: True)
+    monkeypatch.setitem(
+        chat_pipeline.CANONICAL_PLAN_CACHE,
+        "tenant:sch_zx_mlh:slot:teacher_leave_ranking",
+        {"title": "teacher leave plan", "required_outputs": ["data_evidence"]},
+    )
+
+    assert chat_pipeline._canonical_plan_for_question(
+        "帮我统计教师请假排行，并生成一张管理图和一份汇报PPT。",
+        route_name="universal_hub_ga",
+        session_context={"school_id": "sch_zx_mlh"},
+    ) == {"title": "teacher leave plan", "required_outputs": ["data_evidence"]}
+
+
+def test_canonical_plan_cache_reports_remaining_multimodal_outputs() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    assert chat_pipeline._canonical_plan_remaining_outputs(
+        {"required_outputs": ["data_evidence"]},
+        "帮我统计教师请假排行，并生成一张管理图和一份汇报PPT。",
+    ) == ["image_artifact", "ppt_artifact"]
+
+    assert (
+        chat_pipeline._canonical_plan_remaining_outputs(
+            {"required_outputs": ["data_evidence"]},
+            "请统计教师请假排行",
+        )
+        == []
+    )

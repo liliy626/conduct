@@ -45,6 +45,7 @@ from gateway_core.api.openai_compat.chat_pipeline_parts import request_parts, re
 from gateway_core.api.openai_compat.pipeline_response_tools import build_pipeline_response_tools
 from gateway_core.api.openai_compat.pipeline_setup_flow import prepare_pipeline_setup
 from gateway_core.api.openai_compat.policy_evidence_search import build_policy_evidence_search
+from gateway_core.prompts import prompt_domains
 from gateway_core.prompts.prompt_registry import (
     assemble_llm_messages as _pr_assemble_llm_messages,
     build_answer_style_guard_prompt as _pr_build_answer_style_guard_prompt,
@@ -395,6 +396,26 @@ async def _run_experimental_shadow_hub(
         session_context=state["session_context"],
     )
     if plan is not None:
+        remaining_outputs = _canonical_plan_remaining_outputs(plan, setup.effective_question)
+        if remaining_outputs:
+            if setup.pipeline_ctx.stream:
+                return StreamingResponse(
+                    _stream_canonical_plan_cache_then_hub(
+                        plan=plan,
+                        graph=compile_universal_hub_graph(),
+                        state=state,
+                        config=config,
+                        user_query=setup.effective_question,
+                        session_context=state["session_context"],
+                        runtime_ctx=runtime_ctx,
+                        setup=setup,
+                        response_tools=response_tools,
+                        runtime_response_fns=runtime_response_fns,
+                        monitor_base={**monitor_base, "cache_hit": True},
+                        route_name=route_name,
+                    ),
+                    media_type="text/event-stream",
+                )
         if setup.pipeline_ctx.stream:
             return StreamingResponse(
                 _stream_canonical_plan_cache(
@@ -528,7 +549,15 @@ def _canonical_plan_for_question(
     if not rt._truthy_env("UNIVERSAL_HUB_PLAN_CACHE_ENABLED", "1"):
         return None
     plan = CANONICAL_PLAN_CACHE.get(_canonical_plan_cache_key(question, session_context))
-    return plan if isinstance(plan, dict) else None
+    if not isinstance(plan, dict):
+        return None
+    return plan
+
+
+def _canonical_plan_remaining_outputs(plan: dict[str, Any], question: str) -> list[str]:
+    requested_outputs = prompt_domains.resolve_required_outputs(question, [])
+    completed_outputs = set(plan.get("required_outputs") or [])
+    return [output for output in requested_outputs if output not in completed_outputs]
 
 
 async def _stream_canonical_plan_cache(
@@ -624,6 +653,109 @@ async def _stream_canonical_plan_cache(
         yield runtime_response_fns.stream_end(setup.spec.model_id, setup.completion_id)
 
 
+async def _stream_canonical_plan_cache_then_hub(
+    *,
+    plan: dict[str, Any],
+    graph: Any,
+    state: dict[str, Any],
+    config: dict[str, Any],
+    user_query: str,
+    session_context: dict[str, Any],
+    runtime_ctx: RuntimeContext,
+    setup: Any,
+    response_tools: Any,
+    runtime_response_fns: Any,
+    monitor_base: dict[str, Any],
+    route_name: str,
+):
+    first_token_ms: float | None = None
+    try:
+        async for chunk in UniversalHubStreamAdapter.to_openai_sse(
+            _single_skill_event(
+                SkillEvent(
+                    event_type="process",
+                    data={"text": "- 命中高频问题黄金执行计划，先交付数据证据，再继续生成多模态资产。\n"},
+                )
+            ),
+            model_id=setup.spec.model_id,
+            completion_id=setup.completion_id,
+            stream_tool_events=True,
+            include_done=False,
+        ):
+            if first_token_ms is None:
+                first_token_ms = response_tools.elapsed_ms()
+            yield chunk
+
+        result = await _execute_canonical_plan_cache(
+            plan=plan,
+            runtime_ctx=runtime_ctx,
+            session_context=session_context,
+            user_query=user_query,
+        )
+        text = str(result.get("text") or "")
+        sources = result.get("sources") if isinstance(result.get("sources"), list) else []
+        if text:
+            async for chunk in UniversalHubStreamAdapter.to_openai_sse(
+                _single_skill_event(SkillEvent(event_type="content", data={"text": text})),
+                model_id=setup.spec.model_id,
+                completion_id=setup.completion_id,
+                stream_tool_events=False,
+                include_done=False,
+            ):
+                if first_token_ms is None:
+                    first_token_ms = response_tools.elapsed_ms()
+                yield chunk
+        if sources:
+            async for chunk in UniversalHubStreamAdapter.to_openai_sse(
+                _single_skill_event(SkillEvent(event_type="evidence", data={"sources": sources})),
+                model_id=setup.spec.model_id,
+                completion_id=setup.completion_id,
+                stream_tool_events=False,
+                include_done=False,
+            ):
+                if first_token_ms is None:
+                    first_token_ms = response_tools.elapsed_ms()
+                yield chunk
+
+        hub_state = {
+            **state,
+            "messages": [*list(state.get("messages") or []), AIMessage(content=text)] if text else list(state.get("messages") or []),
+            "completed_outputs": list(plan.get("required_outputs") or []),
+            "visited_skills": list(result.get("visited_skills") or ["canonical_plan_cache"]),
+            "meta_context": {
+                **dict(state.get("meta_context") or {}),
+                "executed_sql_lineage": list(result.get("lineage_ledger") or []),
+            },
+        }
+        async for chunk in _stream_experimental_shadow_hub(
+            graph=graph,
+            state=hub_state,
+            config=config,
+            setup=setup,
+            response_tools=response_tools,
+            runtime_response_fns=runtime_response_fns,
+            monitor_base=monitor_base,
+            route_name=route_name,
+            suppress_final_text=True,
+            first_token_ms=first_token_ms,
+        ):
+            yield chunk
+    except Exception as exc:
+        text = response_tools.build_upstream_error_text(exc)
+        yield runtime_response_fns.stream_chunk(setup.spec.model_id, setup.completion_id, text)
+        response_tools.log_monitor_event(
+            {
+                **monitor_base,
+                "event": "chat_completion",
+                "status": "error",
+                "response_mode": f"{route_name}_plan_cache_multimodal_stream",
+                "error_type": type(exc).__name__,
+                "answer_preview": _monitor_answer_preview(text),
+            },
+            first_token_ms=first_token_ms,
+            stream_done=True,
+        )
+        yield runtime_response_fns.stream_end(setup.spec.model_id, setup.completion_id)
 async def _execute_canonical_plan_cache(
     *,
     plan: dict[str, Any],
@@ -760,8 +892,9 @@ async def _stream_experimental_shadow_hub(
     runtime_response_fns: Any,
     monitor_base: dict[str, Any],
     route_name: str = "experimental_shadow_hub",
+    suppress_final_text: bool = False,
+    first_token_ms: float | None = None,
 ):
-    first_token_ms: float | None = None
     content_buffer = StringIO()
     content_buffer_chars = 0
     transactional_events: list[SkillEvent] = []
@@ -803,7 +936,7 @@ async def _stream_experimental_shadow_hub(
 
         final_state = final_state or {}
         text = _experimental_shadow_final_text(final_state)
-        if text and not content_emitted:
+        if text and not content_emitted and not suppress_final_text:
             async for chunk in UniversalHubStreamAdapter.to_openai_sse(
                 _single_skill_event(SkillEvent(event_type="content", data={"text": text})),
                 model_id=setup.spec.model_id,

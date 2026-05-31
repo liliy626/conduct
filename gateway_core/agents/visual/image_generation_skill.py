@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -63,7 +64,14 @@ class ImageGenerationSkill(BaseMultimodalAgentSkill):
         yield SkillEvent(event_type="process", data={"text": "正在生成校园大屏可视化插图...\n"})
         await asyncio.sleep(float(ctx.get("image_latency_sec", 0.05) or 0))
 
-        image_result = await asyncio.to_thread(_generate_image, prompt=prompt, sql_hash=sql_hash, state=state, ctx=ctx)
+        try:
+            image_result = await asyncio.wait_for(
+                asyncio.to_thread(_generate_image, prompt=prompt, sql_hash=sql_hash, state=state, ctx=ctx),
+                timeout=_image_timeout_sec(ctx),
+            )
+        except TimeoutError:
+            yield SkillEvent(event_type="process", data={"text": "生图失败：图像生成超时，已释放后续多模态任务继续执行。\n"})
+            return
         if image_result.get("error"):
             yield SkillEvent(event_type="process", data={"text": f"生图失败：{image_result['error']}\n"})
             return
@@ -164,3 +172,11 @@ def _generate_image(
         return {"error": "image generation returned no artifact"}
     finally:
         del output
+
+
+def _image_timeout_sec(ctx: RuntimeContext | dict[str, Any]) -> float:
+    raw = ctx.get("image_timeout_sec") or os.getenv("UNIVERSAL_HUB_IMAGE_TIMEOUT_SEC", "45")
+    try:
+        return max(0.001, min(float(raw or 45), 120.0))
+    except (TypeError, ValueError):
+        return 45.0

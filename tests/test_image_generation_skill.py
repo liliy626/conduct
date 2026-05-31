@@ -629,6 +629,51 @@ def test_image_generation_skill_keeps_event_loop_free_during_openai_write(tmp_pa
     assert asyncio.run(run_with_ticker()) >= 3
 
 
+def test_image_generation_skill_timeout_does_not_block_graph(monkeypatch) -> None:
+    import gateway_core.agents.visual.image_generation_skill as image_generation_skill
+    from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
+
+    def slow_generate(**_kwargs):
+        time.sleep(0.2)
+        return {"url": "https://cdn.example.test/late.png"}
+
+    monkeypatch.setattr(image_generation_skill, "_generate_image", slow_generate)
+
+    state = {
+        "messages": [HumanMessage(content="把教师请假排行做成一张管理大屏图")],
+        "session_context": {"school_id": "sch_zx_mlh", "schema_name": "zx_mlh"},
+        "required_outputs": ["image_artifact"],
+        "completed_outputs": ["data_evidence"],
+        "artifact_refs": [],
+        "multimodal_artifacts": {},
+        "meta_context": {
+            "executed_sql_lineage": [
+                {
+                    "sql_hash": SQL_HASH,
+                    "tables_used": ["zx_mlh.教师销假_请假明细"],
+                    "row_count": 20,
+                    "query_purpose": "统计教师请假排行",
+                }
+            ]
+        },
+    }
+
+    async def collect() -> list:
+        return [
+            event
+            async for event in ImageGenerationSkill().astream(
+                state,
+                ctx={"image_latency_sec": 0, "image_timeout_sec": 0.01},
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert events[-1].event_type == "process"
+    assert "生图失败" in events[-1].data["text"]
+    assert "超时" in events[-1].data["text"]
+
+
 def test_triple_axis_prompt_synthesizer_aligns_style_entity_and_data() -> None:
     from gateway_core.agents.visual.prompt_synthesizer import TripleAxisPromptSynthesizer
     from gateway_core.prompts.prompt_domains import IMAGE_STYLE_THEMES

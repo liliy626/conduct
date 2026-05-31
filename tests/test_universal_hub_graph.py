@@ -105,6 +105,25 @@ class _ImageSkillNeedsLineage(BaseAgentSkill):
         yield SkillEvent(event_type="content", data={"text": "image artifact ready"})
 
 
+class _PptSkillNeedsLineage(BaseAgentSkill):
+    seen_lineage: list[dict[str, Any]] = []
+
+    @property
+    def name(self) -> str:
+        return "ppt_generator"
+
+    async def astream(
+        self,
+        state: dict[str, Any],
+        ctx: RuntimeContext | dict[str, Any],
+    ) -> AsyncIterator[SkillEvent]:
+        lineages = (state.get("meta_context") or {}).get("executed_sql_lineage") or []
+        type(self).seen_lineage = list(lineages)
+        assert type(self).seen_lineage
+        assert type(self).seen_lineage[-1]["sql_hash"] == "a" * 64
+        yield SkillEvent(event_type="content", data={"text": "ppt artifact ready"})
+
+
 def _fake_registry(skill_cls: type[BaseAgentSkill] = _FakeDataSkill) -> dict[str, SkillSpec]:
     return {
         "fake_data": SkillSpec(
@@ -135,6 +154,14 @@ def _fake_multimodal_registry() -> dict[str, SkillSpec]:
             tools=frozenset({"image_generation"}),
             supports_stream=True,
             default_model_role="visual_agent",
+        ),
+        "ppt_generator": SkillSpec(
+            name="ppt_generator",
+            skill_cls=_PptSkillNeedsLineage,
+            outputs=frozenset({"ppt_artifact"}),
+            tools=frozenset({"ppt_generation"}),
+            supports_stream=True,
+            default_model_role="presentation_agent",
         ),
     }
 
@@ -366,6 +393,82 @@ def test_visual_query_runs_data_then_image_and_passes_sql_lineage() -> None:
     assert final_state["visited_skills"] == ["fake_data", "image_generator"]
     assert final_state["meta_context"]["executed_sql_lineage"][-1]["sql_hash"] == "a" * 64
     assert _ImageSkillNeedsLineage.seen_lineage[-1]["row_count"] == 11
+
+
+def test_visual_and_ppt_query_runs_data_then_both_artifact_skills() -> None:
+    from gateway_core.agents.universal_hub.graph_builder import compile_universal_hub_graph
+
+    _ImageSkillNeedsLineage.seen_lineage = []
+    _PptSkillNeedsLineage.seen_lineage = []
+    graph = compile_universal_hub_graph(skill_registry=_fake_multimodal_registry())
+
+    final_state = asyncio.run(
+        graph.ainvoke(
+            {
+                "messages": [
+                    HumanMessage(content="帮我统计教师请假排行，并生成一张管理图和一份汇报PPT。")
+                ],
+                "session_context": {"school_id": "sch_test", "schema_name": "test_schema"},
+                "required_outputs": ["data_evidence"],
+                "completed_outputs": [],
+                "evidence_refs": [],
+                "artifact_refs": [],
+                "visited_skills": [],
+                "skill_call_count": 0,
+                "max_skill_calls": 4,
+                "meta_context": {},
+                "multimodal_artifacts": {},
+            },
+            config={"configurable": {"runtime_ctx": RuntimeContext(runtime_marker="ctx-only")}},
+        )
+    )
+
+    assert final_state["required_outputs"] == ["data_evidence", "image_artifact", "ppt_artifact"]
+    assert final_state["completed_outputs"] == ["data_evidence", "image_artifact", "ppt_artifact"]
+    assert final_state["visited_skills"] == ["fake_data", "image_generator", "ppt_generator"]
+    assert _ImageSkillNeedsLineage.seen_lineage[-1]["row_count"] == 11
+    assert _PptSkillNeedsLineage.seen_lineage[-1]["row_count"] == 11
+
+
+def test_streaming_graph_events_include_image_and_ppt_artifact_skills() -> None:
+    from gateway_core.agents.universal_hub.graph_builder import compile_universal_hub_graph
+
+    graph = compile_universal_hub_graph(skill_registry=_fake_multimodal_registry())
+
+    async def collect_event_texts() -> list[str]:
+        seen: list[str] = []
+        async for event in graph.astream_events(
+            {
+                "messages": [
+                    HumanMessage(content="帮我统计教师请假排行，并生成一张管理图和一份汇报PPT。")
+                ],
+                "session_context": {"school_id": "sch_test", "schema_name": "test_schema"},
+                "required_outputs": ["data_evidence"],
+                "completed_outputs": [],
+                "evidence_refs": [],
+                "artifact_refs": [],
+                "visited_skills": [],
+                "skill_call_count": 0,
+                "max_skill_calls": 4,
+                "meta_context": {},
+                "multimodal_artifacts": {},
+            },
+            config={"configurable": {"runtime_ctx": RuntimeContext(runtime_marker="ctx-only")}},
+            version="v2",
+        ):
+            if event.get("event") == "on_custom_event" and event.get("name") == "skill_stream_chunk":
+                data = event.get("data") or {}
+                payload = data.get("data")
+                if isinstance(payload, dict):
+                    seen.append(str(payload.get("text") or payload.get("content") or ""))
+                else:
+                    seen.append(str(payload or ""))
+        return seen
+
+    texts = asyncio.run(collect_event_texts())
+
+    assert "image artifact ready" in texts
+    assert "ppt artifact ready" in texts
 
 
 def test_non_visual_followup_does_not_dispatch_stale_image_artifact() -> None:
