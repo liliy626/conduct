@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from urllib.parse import ParseResult
 from urllib.parse import quote
 from urllib.parse import urlparse
 
@@ -42,10 +43,8 @@ def safe_artifact_path(*, tenant_id: str, tool_name: str, suffix: str) -> Path:
 def artifact_download_url(path: str | Path) -> str:
     """Build a browser-downloadable URL for a generated artifact."""
     rel = artifact_relative_path(path)
-    base = os.getenv("GATEWAY_PUBLIC_BASE_URL", "").strip().rstrip("/")
     url_path = f"/v1/artifacts/{quote(rel, safe='/')}"
-    if base and urlparse(base).scheme != "https":
-        return url_path
+    base = _public_artifact_base_url()
     return f"{base}{url_path}" if base else url_path
 
 
@@ -54,7 +53,7 @@ def validate_external_artifact_url(url: str) -> str:
     parsed = urlparse(clean)
     if clean.startswith("/v1/artifacts/"):
         return clean
-    if parsed.scheme != "https" or not parsed.hostname:
+    if not _is_allowed_artifact_url(parsed):
         raise ArtifactValidationError("artifact URL must be an HTTPS URL or local artifact path")
     host = parsed.hostname.lower()
     if not any(host == allowed or host.endswith(f".{allowed}") for allowed in _allowed_artifact_hosts()):
@@ -90,6 +89,28 @@ def _allowed_artifact_hosts() -> tuple[str, ...]:
         for item in configured.split(",")
         if (host := item.strip().lower())
     ) or _DEFAULT_ALLOWED_ARTIFACT_HOSTS
+
+
+def _public_artifact_base_url() -> str:
+    base = os.getenv("GATEWAY_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    parsed = urlparse(base)
+    if not base or _is_placeholder_public_base(parsed):
+        return os.getenv("GATEWAY_LOCAL_PUBLIC_BASE_URL", "http://127.0.0.1:8008").strip().rstrip("/")
+    if _is_allowed_artifact_url(parsed):
+        return base
+    return ""
+
+
+def _is_placeholder_public_base(parsed: ParseResult) -> bool:
+    host = (parsed.hostname or "").lower()
+    return host in {"", "your-server-domain", "example.com", "localhost.example"}
+
+
+def _is_allowed_artifact_url(parsed: ParseResult) -> bool:
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "https" and host:
+        return True
+    return parsed.scheme == "http" and host in {"127.0.0.1", "localhost", "::1"}
 
 
 def _safe_segment(value: str) -> str:

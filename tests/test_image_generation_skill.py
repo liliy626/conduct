@@ -873,6 +873,18 @@ def test_generate_image_releases_tool_output_after_url(monkeypatch) -> None:
     assert released["value"] is True
 
 
+def test_local_artifact_download_url_is_openwebui_reachable(monkeypatch, tmp_path) -> None:
+    from gateway_core.tools.artifact_store import artifact_download_url, safe_artifact_path
+
+    monkeypatch.setenv("GATEWAY_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("GATEWAY_PUBLIC_BASE_URL", "http://your-server-domain:8008")
+
+    path = safe_artifact_path(tenant_id="sch_zx_mlh", tool_name="image", suffix=".png")
+    path.write_bytes(b"png")
+
+    assert artifact_download_url(path).startswith("http://127.0.0.1:8008/v1/artifacts/")
+
+
 def test_ppt_generation_skill_uses_multimodal_contract_and_registered_route() -> None:
     from gateway_core.agents.ppt.ppt_generation_skill import PptGenerationSkill
     from gateway_core.agents.universal_hub.registry import mandatory_candidate_skill_names
@@ -895,6 +907,29 @@ def test_ppt_generation_skill_uses_multimodal_contract_and_registered_route() ->
     assert events[-1].data["type"] == "ppt_artifact"
     assert payload["ppt_sha256"] == __import__("hashlib").sha256(payload["cdn_url"].encode("utf-8")).hexdigest()
     assert payload["title"] == "2026校园假勤与行规数据深度审计报告"
+
+
+def test_ppt_generation_skill_default_writes_local_ppt_artifact(tmp_path, monkeypatch) -> None:
+    from gateway_core.agents.ppt.ppt_generation_skill import PptGenerationSkill
+
+    monkeypatch.setenv("GATEWAY_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("GATEWAY_PUBLIC_BASE_URL", "http://your-server-domain:8008")
+
+    async def collect() -> list:
+        return [
+            event
+            async for event in PptGenerationSkill().astream(
+                {"messages": [], "session_context": {"school_id": "sch_zx_mlh"}},
+                ctx={"ppt_latency_sec": 0},
+            )
+        ]
+
+    events = asyncio.run(collect())
+    payload = events[-1].data["payload"]
+
+    assert payload["cdn_url"].startswith("http://127.0.0.1:8008/v1/artifacts/sch_zx_mlh/slide/")
+    assert payload["cdn_url"].endswith(".pptx")
+    assert list((tmp_path / "artifacts" / "sch_zx_mlh" / "slide").glob("*.pptx"))
 
 
 def test_ppt_generation_skill_uses_injected_bailian_provider_without_naked_event() -> None:

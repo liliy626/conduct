@@ -9,7 +9,9 @@ from typing import Any
 from gateway_core.agents.base_skill import BaseMultimodalAgentSkill, RuntimeContext
 from gateway_core.agents.universal_hub.models import MultimodalOutputContract, SkillEvent
 from gateway_core.agents.universal_hub.state import UniversalAgentState
+from gateway_core.tools.slide_tool import SlideTool
 from gateway_core.tools.artifact_store import validate_external_artifact_url
+from gateway_core.tools.tool_core import AgentToolInput, ToolExecutionContext
 
 
 class PptGenerationSkill(BaseMultimodalAgentSkill):
@@ -44,9 +46,10 @@ class PptGenerationSkill(BaseMultimodalAgentSkill):
         provider_result: dict[str, Any] | None = None
         try:
             provider_result = await _call_bailian_provider(state, ctx)
-            cdn_url = _ppt_url(state, ctx, provider_result)
-            ppt_sha256 = hashlib.sha256(cdn_url.encode("utf-8")).hexdigest()
             ppt_title = _ppt_title(state, ctx, provider_result)
+            pages_preview = _pages_preview(ctx, provider_result)
+            cdn_url = _ppt_url(state, ctx, provider_result, title=ppt_title, pages_preview=pages_preview)
+            ppt_sha256 = hashlib.sha256(cdn_url.encode("utf-8")).hexdigest()
             return MultimodalOutputContract(
                 artifact_type="ppt_artifact",
                 artifact_id=f"ppt_{ppt_sha256[:12]}",
@@ -56,7 +59,7 @@ class PptGenerationSkill(BaseMultimodalAgentSkill):
                     "ppt_title": ppt_title,
                     "title": ppt_title,
                     "page_count": _ppt_page_count(ctx, provider_result),
-                    "pages_preview": _pages_preview(ctx, provider_result),
+                    "pages_preview": pages_preview,
                     "render_engine": str(
                         provider_result.get("render_engine") or "阿里云百炼大模型演示文稿组件"
                     ),
@@ -90,19 +93,17 @@ def _ppt_url(
     state: UniversalAgentState,
     ctx: RuntimeContext | dict[str, Any],
     provider_result: dict[str, Any],
+    *,
+    title: str,
+    pages_preview: list[dict[str, str]],
 ) -> str:
     factory = ctx.get("ppt_url_factory")
     if callable(factory):
         return validate_external_artifact_url(str(factory(state)))
-    return validate_external_artifact_url(
-        str(
-            provider_result.get("download_url")
-            or provider_result.get("cdn_url")
-            or provider_result.get("url")
-            or ctx.get("ppt_mock_url")
-            or "https://cdn.yili-edu.com/artifacts/ppt_report_2026.pptx"
-        )
-    )
+    explicit_url = provider_result.get("download_url") or provider_result.get("cdn_url") or provider_result.get("url") or ctx.get("ppt_mock_url")
+    if explicit_url:
+        return validate_external_artifact_url(str(explicit_url))
+    return _local_ppt_url(state, title=title, pages_preview=pages_preview)
 
 
 def _ppt_title(
@@ -132,6 +133,31 @@ def _pages_preview(ctx: RuntimeContext | dict[str, Any], provider_result: dict[s
         {"slide_title": "行政摘要", "slide_summary": "请假趋势与行规风险总览"},
         {"slide_title": "核心数据血缘", "slide_summary": "绑定已审计数据与多模态资产指纹"},
     ]
+
+
+def _local_ppt_url(state: UniversalAgentState, *, title: str, pages_preview: list[dict[str, str]]) -> str:
+    tenant_id = _school_id(state)
+    output = SlideTool().run(
+        AgentToolInput(
+            arguments={
+                "title": title,
+                "sections": [
+                    {
+                        "title": str(page.get("slide_title") or "页面"),
+                        "bullets": [str(page.get("slide_summary") or "需补充核实后生成汇报内容")],
+                    }
+                    for page in pages_preview
+                ],
+            }
+        ),
+        ToolExecutionContext(tenant_id=tenant_id, request_id=f"ppt_{tenant_id}"),
+    )
+    if not output.ok:
+        raise ValueError(output.error or "PPT 本地落盘失败")
+    for artifact in output.artifacts:
+        if isinstance(artifact, dict) and artifact.get("type") == "pptx":
+            return validate_external_artifact_url(str(artifact.get("download_url") or ""))
+    raise ValueError("PPT 本地落盘未返回下载地址")
 
 
 def _sql_lineages(state: UniversalAgentState) -> list[dict[str, Any]]:
