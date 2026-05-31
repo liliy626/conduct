@@ -1,0 +1,28 @@
+services:
+  gateway:
+    build: .
+    container_name: yili-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MODEL_CONFIG_PATH=/app/model_config.yaml
+      - POSTGRES_DSN=postgresql://${SERVER_POSTGRES_USER:-yili_user}:${SERVER_POSTGRES_PASSWORD:-change_me}@${POSTGRES_HOST:-yili-db}:5432/${SERVER_POSTGRES_DB:-yili}
+      - MEILANHU_POSTGRES_SCHEMA=${MEILANHU_POSTGRES_SCHEMA:-public}
+    ports:
+      - "${GATEWAY_PORT:-8008}:8008"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./:/app
+      - ./model_config.yaml:/app/model_config.yaml:ro
+    networks:
+      - yili_net
+      - baota_net
+
+networks:
+  yili_net:
+    driver: bridge
+  baota_net:
+    external: true

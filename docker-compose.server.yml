@@ -1,0 +1,107 @@
+services:
+  yili-db:
+    image: pgvector/pgvector:pg16
+    container_name: yili-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${SERVER_POSTGRES_USER:-yili_user}
+      POSTGRES_PASSWORD: ${SERVER_POSTGRES_PASSWORD:?SERVER_POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${SERVER_POSTGRES_DB:-yili}
+    ports:
+      - "${SERVER_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - yili_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - yili_net
+
+  yili-redis:
+    image: redis:7-alpine
+    container_name: yili-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - yili_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - yili_net
+
+  yili-gateway:
+    build: .
+    container_name: yili-gateway
+    restart: unless-stopped
+    depends_on:
+      yili-db:
+        condition: service_healthy
+      yili-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODEL_CONFIG_PATH: /app/model_config.yaml
+      # If SERVER_POSTGRES_PASSWORD contains URL-reserved characters, set a full
+      # URL-encoded POSTGRES_DSN in .env instead of using this fallback.
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://${SERVER_POSTGRES_USER:-yili_user}:${SERVER_POSTGRES_PASSWORD:?SERVER_POSTGRES_PASSWORD is required}@yili-db:5432/${SERVER_POSTGRES_DB:-yili}}
+      MEILANHU_POSTGRES_SCHEMA: ${MEILANHU_POSTGRES_SCHEMA:-public}
+      REDIS_URL: ${REDIS_URL:-redis://yili-redis:6379/0}
+      AGENT_JOB_GATEWAY_BASE_URL: ${AGENT_JOB_GATEWAY_BASE_URL:-http://yili-gateway:8008}
+    ports:
+      - "${GATEWAY_PORT:-8008}:8008"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./model_config.yaml:/app/model_config.yaml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - yili_net
+      - baota_net
+
+  yili-agent-worker:
+    build: .
+    container_name: yili-agent-worker
+    restart: unless-stopped
+    depends_on:
+      yili-db:
+        condition: service_healthy
+      yili-redis:
+        condition: service_healthy
+      yili-gateway:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODEL_CONFIG_PATH: /app/model_config.yaml
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://${SERVER_POSTGRES_USER:-yili_user}:${SERVER_POSTGRES_PASSWORD:?SERVER_POSTGRES_PASSWORD is required}@yili-db:5432/${SERVER_POSTGRES_DB:-yili}}
+      MEILANHU_POSTGRES_SCHEMA: ${MEILANHU_POSTGRES_SCHEMA:-public}
+      REDIS_URL: ${REDIS_URL:-redis://yili-redis:6379/0}
+      AGENT_JOB_GATEWAY_BASE_URL: ${AGENT_JOB_GATEWAY_BASE_URL:-http://yili-gateway:8008}
+    command: ["python", "scripts/run_agent_worker.py"]
+    volumes:
+      - ./model_config.yaml:/app/model_config.yaml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - yili_net
+
+networks:
+  yili_net:
+    driver: bridge
+  baota_net:
+    external: true
+
+volumes:
+  yili_pgdata:
+  yili_redisdata:

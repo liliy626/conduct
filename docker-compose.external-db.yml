@@ -1,0 +1,124 @@
+services:
+  yili-redis:
+    image: redis:7-alpine
+    container_name: yili-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - yili_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - yili_net
+
+  yili-searxng:
+    image: searxng/searxng:latest
+    container_name: yili-searxng
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://127.0.0.1:8088/}
+    volumes:
+      - ./searxng:/etc/searxng:ro
+    ports:
+      - "${SEARXNG_PORT:-8088}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:8080/search?q=health&format=json' >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - yili_net
+
+  yili-gateway:
+    build: .
+    container_name: yili-gateway
+    restart: unless-stopped
+    depends_on:
+      yili-redis:
+        condition: service_healthy
+      yili-searxng:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODEL_CONFIG_PATH: /app/model_config.yaml
+      REDIS_URL: ${REDIS_URL:-redis://yili-redis:6379/0}
+      AGENT_JOB_GATEWAY_BASE_URL: ${AGENT_JOB_GATEWAY_BASE_URL:-http://yili-gateway:8008}
+    ports:
+      - "${GATEWAY_PORT:-8008}:8008"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./model_config.yaml:/app/model_config.yaml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./artifacts:/app/artifacts
+    networks:
+      - yili_net
+      - baota_net
+
+  yili-agent-worker:
+    build: .
+    container_name: yili-agent-worker
+    restart: unless-stopped
+    depends_on:
+      yili-redis:
+        condition: service_healthy
+      yili-gateway:
+        condition: service_started
+      yili-searxng:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODEL_CONFIG_PATH: /app/model_config.yaml
+      REDIS_URL: ${REDIS_URL:-redis://yili-redis:6379/0}
+      AGENT_JOB_GATEWAY_BASE_URL: ${AGENT_JOB_GATEWAY_BASE_URL:-http://yili-gateway:8008}
+    command: ["python", "scripts/run_agent_worker.py"]
+    volumes:
+      - ./model_config.yaml:/app/model_config.yaml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./artifacts:/app/artifacts
+    networks:
+      - yili_net
+      - baota_net
+
+  yili-sql-history-worker:
+    build: .
+    container_name: yili-sql-history-worker
+    restart: unless-stopped
+    depends_on:
+      yili-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MODEL_CONFIG_PATH: /app/model_config.yaml
+      REDIS_URL: ${REDIS_URL:-redis://yili-redis:6379/0}
+    command: ["python", "scripts/run_sql_history_worker.py"]
+    volumes:
+      - ./model_config.yaml:/app/model_config.yaml:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./artifacts:/app/artifacts
+    networks:
+      - yili_net
+      - baota_net
+
+networks:
+  yili_net:
+    driver: bridge
+  baota_net:
+    external: true
+
+volumes:
+  yili_redisdata:

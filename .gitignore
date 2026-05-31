@@ -1,0 +1,74 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# local env / secrets
+env/
+.env
+.env.local
+.env.*.local
+.claude/
+.venv/
+
+# runtime logs / traces / generated data
+logs/**/*.jsonl
+logs/**/*.json
+logs/**/*.html
+logs/**/*.md
+!logs/**/README.md
+gateway_core/logs/**/*.jsonl
+data/openwebui_question_monitor*.jsonl
+data/openwebui_question_route_monitor.jsonl
+data/gateway_runtime.log
+artifacts/gateway/**
+presenton_data/**
+analysis/**
+!analysis/README.md
+!analysis/failure_labels/README.md
+!analysis/question_sets/README.md
+!analysis/yida_daily_sync/README.md
+
+# release / backup artifacts
+backups/
+.github/dist/
+dist/**
+!dist/README.md
+!dist/server_baseline_current/
+!dist/server_baseline_current/**
+dist/server_baseline_current/.env
+dist/server_baseline_current/logs/**
+dist/server_baseline_current/artifacts/**
+dist/server_baseline_current/data/**
+*.dump
+
+# temp files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+~$*
+.ipynb_checkpoints/
+
+# temporary scripts and local tools
+tmp_scripts/
+scratch/
+playground/
+
+# database artifacts (keep migration SQL in repo)
+*.db
+*.sqlite
+*.sqlite3
+*.sqlitedb
+*.rdb
+*.mdb
+*.accdb

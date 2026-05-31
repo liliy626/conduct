@@ -1,0 +1,76 @@
+default_model: yili-model
+
+models:
+  - id: yili-model
+    provider: deepseek
+    model: deepseek-v4-flash
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+    timeout: 60
+
+  - id: yili-deepseek-r1
+    provider: deepseek
+    model: deepseek-reasoner
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+    timeout: 90
+
+  - id: yili-deepseek-v3
+    provider: deepseek
+    model: deepseek-chat
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+    timeout: 60
+    max_retries: 4
+
+  - id: yili-kimi
+    provider: moonshot
+    model: kimi-3.5-pro
+    base_url: https://api.moonshot.cn/v1
+    api_key_env: MOONSHOT_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+    timeout: 60
+
+  - id: yili-glm
+    provider: bigmodel
+    model: GLM-4.5-Air
+    base_url: https://open.bigmodel.cn/api/paas/v4
+    api_key_env: GLM_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+    timeout: 60
+
+  - id: yili-qwen
+    provider: openai_compatible
+    model: qwen3.5-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+    timeout: 60
+
+  - id: yili-qwen-fast
+    provider: openai_compatible
+    model: qwen-plus
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+    temperature: 0.2
+    max_tokens: 1600
+    timeout: 45
+
+  - id: yili-minimax
+    provider: openai_compatible
+    model: abab6.5s-chat
+    base_url: https://api.minimax.chat/v1/chat/completions
+    api_key_env: MINIMAX_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+    timeout: 60
+ 

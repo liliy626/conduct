@@ -1,0 +1,11 @@
+services:
+  yili-db:
+    container_name: yili-test-db
+
+  yili-gateway:
+    container_name: yili-test-gateway
+    environment:
+      POSTGRES_DSN: ${POSTGRES_DSN}
+
+  yili-sync-scheduler:
+    container_name: yili-test-sync-scheduler
