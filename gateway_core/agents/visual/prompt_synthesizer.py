@@ -14,7 +14,7 @@ from gateway_core.prompts.prompt_domains import (
 
 
 class TripleAxisPromptSynthesizer:
-    """Build image prompts from style intent, entity context, and data evidence."""
+    """Build image prompts from matrix-routed style, entity, and data axes."""
 
     @classmethod
     def synthesize(
@@ -25,56 +25,35 @@ class TripleAxisPromptSynthesizer:
         tables: list[str],
         row_count: int,
     ) -> str:
-        text = _recent_text(history_messages)
-        style_axis = _style_axis(text)
-        entity_axis = _entity_axis(text=text, purpose=purpose)
-        data_axis = _data_axis(tables=tables, row_count=row_count)
-        return IMAGE_MASTER_TEMPLATE.format(
-            style_theme=style_axis,
-            entity_context=entity_axis,
-            data_signal=data_axis,
-        )
-
-
-def _recent_text(history_messages: Sequence[BaseMessage]) -> str:
-    parts: list[str] = []
-    for message in list(history_messages)[-6:]:
-        content = getattr(message, "content", "")
-        if isinstance(content, str):
-            parts.append(content)
-        elif isinstance(content, list):
-            parts.extend(str(item) for item in content)
-        else:
-            parts.append(str(content))
-    return " ".join(parts).lower()
-
-
-def _style_axis(text: str) -> str:
-    key = _route_key(text, STYLE_ROUTER_MATRIX, default_key="default")
-    return IMAGE_STYLE_THEMES[key]
-
-
-def _entity_axis(*, text: str, purpose: str) -> str:
-    combined = f"{text} {purpose}".lower()
-    key = _route_key(combined, ENTITY_ROUTER_MATRIX, default_key="default")
-    return IMAGE_ENTITY_CONTEXTS[key].format(purpose=purpose)
-
-
-def _route_key(text: str, matrix: dict[str, Sequence[str]], *, default_key: str) -> str:
-    return max(
-        [
-            (0, default_key),
-            *[
+        full_text = " ".join(
+            str(item)
+            for content in (getattr(message, "content", "") for message in list(history_messages)[-6:])
+            for item in (content if isinstance(content, list) else [content])
+        ).lower()
+        style_key = max(
+            [(0, "default")]
+            + [
                 (len(str(word)), key)
-                for key, words in matrix.items()
+                for key, words in STYLE_ROUTER_MATRIX.items()
                 for word in words
-                if str(word) and str(word) in text
+                if str(word) and str(word) in full_text
             ],
-        ],
-        key=lambda item: item[0],
-    )[1]
-
-
-def _data_axis(*, tables: list[str], row_count: int) -> str:
-    table_text = ", ".join(tables[:3]) if tables else "audited school data"
-    return f"accurately visualizing {row_count} real-time data records registered in table '{table_text}'"
+            key=lambda item: item[0],
+        )[1]
+        entity_text = f"{full_text} {purpose}".lower()
+        entity_key = max(
+            [(0, "default")]
+            + [
+                (len(str(word)), key)
+                for key, words in ENTITY_ROUTER_MATRIX.items()
+                for word in words
+                if str(word) and str(word) in entity_text
+            ],
+            key=lambda item: item[0],
+        )[1]
+        table_text = (", ".join(tables[:3]), "audited school data")[not bool(tables)]
+        return IMAGE_MASTER_TEMPLATE.format(
+            style_theme=IMAGE_STYLE_THEMES[style_key],
+            entity_context=IMAGE_ENTITY_CONTEXTS[entity_key].format(purpose=purpose),
+            data_signal=f"accurately visualizing {row_count} real-time data records registered in table '{table_text}'",
+        )

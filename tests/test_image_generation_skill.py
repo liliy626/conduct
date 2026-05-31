@@ -5,6 +5,7 @@ import asyncio
 import gc
 import inspect
 import json
+import textwrap
 import time
 from typing import AsyncIterator
 
@@ -338,10 +339,18 @@ def test_prompt_synthesizer_routes_by_configured_matrices(monkeypatch) -> None:
 def test_prompt_synthesizer_router_functions_have_no_explicit_if_branches() -> None:
     import gateway_core.agents.visual.prompt_synthesizer as prompt_synthesizer
 
-    for function_name in ("_style_axis", "_entity_axis", "_route_key"):
-        function_source = inspect.getsource(getattr(prompt_synthesizer, function_name))
-        tree = ast.parse(function_source)
-        assert not any(isinstance(node, ast.If) for node in ast.walk(tree)), function_name
+    function_source = inspect.getsource(prompt_synthesizer.TripleAxisPromptSynthesizer.synthesize)
+    tree = ast.parse(textwrap.dedent(function_source))
+    assert not any(isinstance(node, ast.If) for node in ast.walk(tree))
+
+
+def test_prompt_synthesizer_exposes_no_private_axis_helpers() -> None:
+    import gateway_core.agents.visual.prompt_synthesizer as prompt_synthesizer
+
+    assert not any(
+        hasattr(prompt_synthesizer, helper_name)
+        for helper_name in ("_style_axis", "_entity_axis", "_route_key", "_data_axis")
+    )
 
 
 def test_image_generation_skill_passes_triple_axis_prompt_to_openai(tmp_path, monkeypatch) -> None:
