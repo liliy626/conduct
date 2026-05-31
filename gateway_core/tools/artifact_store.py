@@ -110,7 +110,12 @@ def _is_allowed_artifact_url(parsed: ParseResult) -> bool:
     host = (parsed.hostname or "").lower()
     if parsed.scheme == "https" and host:
         return True
-    return parsed.scheme == "http" and host in {"127.0.0.1", "localhost", "::1"}
+    return parsed.scheme == "http" and (host in {"127.0.0.1", "localhost", "::1"} or _is_allowed_host(host))
+
+
+def _is_allowed_host(host: str) -> bool:
+    clean = str(host or "").lower()
+    return any(clean == allowed or clean.endswith(f".{allowed}") for allowed in _allowed_artifact_hosts())
 
 
 def _safe_segment(value: str) -> str:

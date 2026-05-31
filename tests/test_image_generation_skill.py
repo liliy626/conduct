@@ -885,6 +885,21 @@ def test_local_artifact_download_url_is_openwebui_reachable(monkeypatch, tmp_pat
     assert artifact_download_url(path).startswith("http://127.0.0.1:8008/v1/artifacts/")
 
 
+def test_artifact_download_url_can_use_allowlisted_server_base(monkeypatch, tmp_path) -> None:
+    from gateway_core.tools.artifact_store import artifact_download_url, safe_artifact_path, validate_external_artifact_url
+
+    monkeypatch.setenv("GATEWAY_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("GATEWAY_PUBLIC_BASE_URL", "http://gateway.school.test:8008")
+    monkeypatch.setenv("GATEWAY_ALLOWED_ARTIFACT_URL_HOSTS", "gateway.school.test")
+
+    path = safe_artifact_path(tenant_id="sch_zx_mlh", tool_name="image", suffix=".png")
+    path.write_bytes(b"png")
+    url = artifact_download_url(path)
+
+    assert url.startswith("http://gateway.school.test:8008/v1/artifacts/")
+    assert validate_external_artifact_url(url) == url
+
+
 def test_artifact_endpoint_supports_browser_head_probe(monkeypatch, tmp_path) -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
