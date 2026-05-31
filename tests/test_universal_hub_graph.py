@@ -157,14 +157,35 @@ def test_non_visual_followup_drops_stale_image_artifact_requirement() -> None:
 
 
 def test_visual_keywords_are_loaded_from_prompt_domains(monkeypatch) -> None:
+    from gateway_core.prompts import prompt_domains
     import gateway_core.agents.universal_hub.supervisor_core as supervisor_core
 
-    monkeypatch.setattr(supervisor_core, "VISUAL_INTENT_KEYWORDS", ("画布测试词",))
+    monkeypatch.setattr(
+        prompt_domains,
+        "REQUIRED_OUTPUT_RULES",
+        (
+            prompt_domains.RequiredOutputRule(
+                keywords=("画布测试词",),
+                outputs=("data_evidence", "image_artifact"),
+            ),
+        ),
+    )
 
     assert supervisor_core.determine_required_outputs("请生成画布测试词", ["data_evidence"]) == [
         "data_evidence",
         "image_artifact",
     ]
+
+
+def test_temporary_output_slots_are_loaded_from_prompt_domains(monkeypatch) -> None:
+    from gateway_core.prompts import prompt_domains
+    import gateway_core.agents.universal_hub.supervisor_core as supervisor_core
+
+    monkeypatch.setattr(prompt_domains, "TEMPORARY_OUTPUT_SLOTS", frozenset({"custom_artifact"}))
+
+    required = supervisor_core.determine_required_outputs("那上周呢？", ["data_evidence", "custom_artifact"])
+
+    assert required == ["data_evidence"]
 
 
 def test_universal_hub_graph_dispatches_missing_output_to_registered_skill() -> None:

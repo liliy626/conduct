@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Dict
 
 IMAGE_STYLE_THEMES = {
@@ -45,6 +46,22 @@ VISUAL_INTENT_KEYWORDS = (
     "infographic",
     "illustration",
     "chart",
+)
+
+
+@dataclass(frozen=True)
+class RequiredOutputRule:
+    keywords: tuple[str, ...]
+    outputs: tuple[str, ...]
+
+
+TEMPORARY_OUTPUT_SLOTS = frozenset({"image_artifact"})
+
+REQUIRED_OUTPUT_RULES = (
+    RequiredOutputRule(
+        keywords=VISUAL_INTENT_KEYWORDS,
+        outputs=("data_evidence", "image_artifact"),
+    ),
 )
 
 DOMAIN_CONTEXT_LAYER: Dict[str, str] = {

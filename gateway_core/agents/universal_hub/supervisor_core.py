@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from gateway_core.agents.universal_hub.registry import SKILL_REGISTRY
-from gateway_core.prompts.prompt_domains import VISUAL_INTENT_KEYWORDS
+from gateway_core.prompts import prompt_domains
 
 
 def determine_required_outputs(user_query: str, current_outputs: list[str]) -> list[str]:
@@ -12,13 +12,17 @@ def determine_required_outputs(user_query: str, current_outputs: list[str]) -> l
     itself to a SQL lineage hash.
     """
 
-    outputs = [output for output in dict.fromkeys(current_outputs) if output != "image_artifact"]
+    outputs = [output for output in dict.fromkeys(current_outputs) if output not in prompt_domains.TEMPORARY_OUTPUT_SLOTS]
     query = str(user_query or "").strip().lower()
-    if any(keyword in query for keyword in VISUAL_INTENT_KEYWORDS):
-        if "data_evidence" not in outputs:
-            outputs.append("data_evidence")
-        if "image_artifact" not in outputs:
-            outputs.append("image_artifact")
+    dynamic_outputs = [
+        output
+        for rule in prompt_domains.REQUIRED_OUTPUT_RULES
+        for output in rule.outputs
+        if any(keyword in query for keyword in rule.keywords)
+    ]
+    for output in dynamic_outputs:
+        if output not in outputs:
+            outputs.append(output)
     return outputs
 
 
