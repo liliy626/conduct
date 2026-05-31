@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Any
 
 
 class QueryNormalizer:
     """Map common school questions to deterministic execution slots."""
+
+    @staticmethod
+    def extract_tenant_id(payload_or_context: dict[str, Any] | None) -> str:
+        data = payload_or_context or {}
+        session_context = data.get("session_context") if isinstance(data.get("session_context"), dict) else data
+        tenant_id = str(session_context.get("school_id") or session_context.get("tenant_id") or "default").strip()
+        return tenant_id or "default"
 
     @classmethod
     def to_canonical_slot(cls, query: str) -> str:

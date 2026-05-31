@@ -14,6 +14,18 @@ def test_canonical_plan_cache_key_includes_tenant_id() -> None:
     )
 
 
+def test_query_normalizer_extracts_tenant_id_from_context_and_payload() -> None:
+    from gateway_core.agents.school_sql.query_normalizer import QueryNormalizer
+
+    assert QueryNormalizer.extract_tenant_id({"school_id": " sch_a "}) == "sch_a"
+    assert QueryNormalizer.extract_tenant_id({"tenant_id": "sch_b"}) == "sch_b"
+    assert QueryNormalizer.extract_tenant_id({"session_context": {"school_id": "sch_payload"}}) == "sch_payload"
+    assert QueryNormalizer.extract_tenant_id({"session_context": {"tenant_id": "sch_payload_tenant"}}) == (
+        "sch_payload_tenant"
+    )
+    assert QueryNormalizer.extract_tenant_id({}) == "default"
+
+
 def test_canonical_plan_cache_never_uses_bare_slot_key(monkeypatch) -> None:
     import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
 

@@ -513,8 +513,7 @@ async def _run_experimental_shadow_hub(
 
 
 def _canonical_plan_cache_key(question: str, session_context: dict[str, Any] | None) -> str:
-    context = session_context or {}
-    tenant_id = str(context.get("school_id") or context.get("tenant_id") or "default").strip() or "default"
+    tenant_id = QueryNormalizer.extract_tenant_id(session_context)
     return f"tenant:{tenant_id}:{QueryNormalizer.to_canonical_slot(question)}"
 
 
