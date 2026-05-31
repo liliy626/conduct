@@ -44,6 +44,7 @@ async def stream_school_sql_agent_native(
     openwebui_chat_id: str = "",
     conversation_context: str = "",
     sql_logger: Callable[..., None] | None = None,
+    disabled_tool_names: tuple[str, ...] = (),
 ) -> AsyncIterator[dict[str, Any]]:
     """Run the school-schema DDL ReAct Agent as the primary streaming answerer.
 
@@ -126,6 +127,11 @@ async def stream_school_sql_agent_native(
                 tool_contract=tool_contract,
             ),
         ]
+        disabled_tools = {str(name or "").strip() for name in disabled_tool_names if str(name or "").strip()}
+        if disabled_tools:
+            tool_list = [
+                tool for tool in tool_list if str(getattr(tool, "name", "") or "").strip() not in disabled_tools
+            ]
         if final_handoff_enabled:
             tool_list.append(
                 _final_answer_handoff_tool(

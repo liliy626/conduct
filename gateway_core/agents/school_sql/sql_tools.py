@@ -1731,6 +1731,7 @@ def _sql_evidence_lineage(
         "sql_hash": sql_hash,
         "tables_used": [str(item or "").strip() for item in tables_used if str(item or "").strip()],
         "row_count": int(row_count or 0),
+        "row_sample": rows[:5] if isinstance(rows, list) else [],
         "time_range": _sql_time_range(sql),
         "query_purpose": str(query_purpose or "").strip(),
         "sample_row_fingerprint": _row_fingerprint(rows),

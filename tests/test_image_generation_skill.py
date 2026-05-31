@@ -241,6 +241,74 @@ def test_image_generation_skill_prefers_non_empty_sql_lineage() -> None:
     assert "已审计校园数据表" in payload["prompt_used"]
 
 
+def test_image_generation_skill_prompt_includes_real_row_sample_values() -> None:
+    from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
+
+    state = {
+        "messages": [HumanMessage(content="把眼保健操纪律最差的年级画成警示图")],
+        "session_context": {"school_id": "sch_zx_mlh", "schema_name": "zx_mlh"},
+        "required_outputs": ["image_artifact"],
+        "completed_outputs": ["data_evidence"],
+        "artifact_refs": [],
+        "multimodal_artifacts": {},
+        "meta_context": {
+            "executed_sql_lineage": [
+                {
+                    "sql_hash": SQL_HASH,
+                    "tables_used": ["zx_mlh.行规检查_行规检查"],
+                    "row_count": 3,
+                    "query_purpose": "眼保健操纪律年级排行",
+                    "row_sample": [
+                        {"年级": "6年级", "总扣分": 2.0, "违纪次数": 2},
+                        {"年级": "7年级", "总扣分": 1.0, "违纪次数": 1},
+                    ],
+                }
+            ]
+        },
+    }
+
+    async def collect() -> list:
+        return [
+            event
+            async for event in ImageGenerationSkill().astream(
+                state,
+                ctx={"image_latency_sec": 0, "image_mock_mode": True},
+            )
+        ]
+
+    payload = asyncio.run(collect())[-1].data["payload"]
+
+    assert "6年级" in payload["prompt_used"]
+    assert "总扣分：2" in payload["prompt_used"]
+    assert "违纪次数：2" in payload["prompt_used"]
+    assert "禁止写“未提供数据”" in payload["prompt_used"]
+
+
+def test_sql_lineage_preserves_limited_row_sample_for_visual_workers() -> None:
+    from gateway_core.agents.school_sql.sql_tools import _sql_evidence_lineage
+
+    lineage = _sql_evidence_lineage(
+        task_id="task_1",
+        sql="select * from zx_mlh.行规检查_行规检查",
+        tables_used=["zx_mlh.行规检查_行规检查"],
+        row_count=2,
+        query_purpose="眼保健操纪律年级排行",
+        rows=[
+            {"年级": "6年级", "总扣分": 2.0, "违纪次数": 2},
+            {"年级": "7年级", "总扣分": 1.0, "违纪次数": 1},
+        ],
+        tenant_id="sch_zx_mlh",
+        schema_name="zx_mlh",
+        effective_limit=20,
+        total_row_count=2,
+    )
+
+    assert lineage["row_sample"] == [
+        {"年级": "6年级", "总扣分": 2.0, "违纪次数": 2},
+        {"年级": "7年级", "总扣分": 1.0, "违纪次数": 1},
+    ]
+
+
 def test_image_generation_skill_has_no_legacy_prompt_or_blind_tail_lineage() -> None:
     import gateway_core.agents.visual.image_generation_skill as image_generation_skill
 
@@ -248,6 +316,32 @@ def test_image_generation_skill_has_no_legacy_prompt_or_blind_tail_lineage() -> 
 
     assert "_compile_prompt" not in source
     assert "lineages[-1]" not in source
+
+
+def test_school_sql_skill_strips_multimodal_request_for_dedicated_workers() -> None:
+    from gateway_core.agents.school_sql.school_sql_skill import SchoolSqlSkill
+
+    captured: dict = {}
+
+    async def stream_fn(**kwargs):
+        captured.update(kwargs)
+        if False:
+            yield {}
+
+    state = {
+        "messages": [HumanMessage(content="眼保健操纪律最差的年级是哪个？生成一张纯中文管理插图")],
+        "session_context": {"stream_fn": stream_fn, "token": "key_a", "school_scope": "zx_mlh"},
+        "required_outputs": ["data_evidence", "image_artifact"],
+    }
+
+    async def collect() -> list:
+        return [event async for event in SchoolSqlSkill().astream(state, {})]
+
+    asyncio.run(collect())
+
+    assert "生成一张纯中文管理插图" not in captured["question"]
+    assert "只查询支撑该多模态请求所需的真实数据证据" in captured["question"]
+    assert {"generate_image_tool", "plot", "slide", "chart"} <= set(captured["disabled_tool_names"])
 
 
 def test_image_artifact_event_streams_markdown_and_sources() -> None:
@@ -698,6 +792,14 @@ def test_image_generation_skill_timeout_does_not_block_graph(monkeypatch) -> Non
             "message": events[-1].data["text"].strip(),
         }
     ]
+
+
+def test_image_generation_skill_default_timeout_matches_openai_image_window(monkeypatch) -> None:
+    from gateway_core.agents.visual.image_generation_skill import _image_timeout_sec
+
+    monkeypatch.delenv("UNIVERSAL_HUB_IMAGE_TIMEOUT_SEC", raising=False)
+
+    assert _image_timeout_sec({}) == 120.0
 
 
 def test_triple_axis_prompt_synthesizer_aligns_style_entity_and_data() -> None:

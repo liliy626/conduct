@@ -186,3 +186,48 @@ def test_shadow_hub_stream_clears_transactional_buffers() -> None:
     assert "content_buffer.truncate(0)" in source
     assert "content_buffer.seek(0)" in source
     assert "transactional_events.clear()" in source
+
+
+def test_multimodal_sql_content_sanitizer_removes_image_tool_disclaimer() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    text = """
+## 眼保健操纪律分析
+
+| 年级 | 总扣分 |
+| --- | --- |
+| 7年级 | 42 |
+
+### 关于管理插图的说明
+
+非常抱歉，当前环境中没有可用的图片生成工具，因此暂时无法为您生成管理插图。
+> ⚠️ **说明：** 当前环境暂无可用的图片生成工具，无法为您生成管理插图。
+"""
+
+    cleaned = chat_pipeline._sanitize_multimodal_sql_content(
+        text,
+        required_outputs=["data_evidence", "image_artifact"],
+    )
+
+    assert "7年级" in cleaned
+    assert "没有可用的图片生成工具" not in cleaned
+    assert "暂无可用的图片生成工具" not in cleaned
+    assert "关于管理插图" not in cleaned
+
+
+def test_shadow_hub_stream_flushes_buffer_before_multimodal_worker() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    source = inspect.getsource(chat_pipeline._stream_experimental_shadow_hub)
+
+    assert "_is_multimodal_worker_process_event(skill_event)" in source
+    assert "_sanitize_multimodal_sql_content" in source
+
+
+def test_shadow_hub_stream_sends_initial_reasoning_heartbeat() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    source = inspect.getsource(chat_pipeline._stream_experimental_shadow_hub)
+
+    assert "正在解析问题并准备查库" in source
+    assert "event_type=\"process\"" in source

@@ -941,6 +941,21 @@ async def _stream_experimental_shadow_hub(
     content_emitted = False
     max_content_chars = _experimental_shadow_transactional_content_max_chars()
     try:
+        async for chunk in UniversalHubStreamAdapter.to_openai_sse(
+            _single_skill_event(
+                SkillEvent(
+                    event_type="process",
+                    data={"text": "已进入智能校园数据网关，正在解析问题并准备查库。\n"},
+                )
+            ),
+            model_id=setup.spec.model_id,
+            completion_id=setup.completion_id,
+            stream_tool_events=True,
+            include_done=False,
+        ):
+            if first_token_ms is None:
+                first_token_ms = response_tools.elapsed_ms()
+            yield chunk
         async for event in graph.astream_events(state, config=config, version="v2"):
             if event.get("event") == "on_custom_event" and event.get("name") == "skill_stream_chunk":
                 skill_event = _skill_event_from_custom_graph_event(event)
@@ -958,6 +973,25 @@ async def _stream_experimental_shadow_hub(
                 if skill_event.event_type in {"artifact", "evidence", "evidence_completed"}:
                     transactional_events.append(skill_event)
                     continue
+                if content_buffer_chars and _is_multimodal_worker_process_event(skill_event):
+                    buffered_text = _sanitize_multimodal_sql_content(
+                        content_buffer.getvalue(),
+                        required_outputs=list(state.get("required_outputs") or []),
+                    )
+                    content_buffer.truncate(0)
+                    content_buffer.seek(0)
+                    content_buffer_chars = 0
+                    if buffered_text:
+                        async for chunk in UniversalHubStreamAdapter.to_openai_sse(
+                            _single_skill_event(SkillEvent(event_type="content", data={"text": buffered_text})),
+                            model_id=setup.spec.model_id,
+                            completion_id=setup.completion_id,
+                            stream_tool_events=False,
+                            include_done=False,
+                        ):
+                            if first_token_ms is None:
+                                first_token_ms = response_tools.elapsed_ms()
+                            yield chunk
                 async for chunk in UniversalHubStreamAdapter.to_openai_sse(
                     _single_skill_event(skill_event),
                     model_id=setup.spec.model_id,
@@ -987,7 +1021,10 @@ async def _stream_experimental_shadow_hub(
                     first_token_ms = response_tools.elapsed_ms()
                 yield chunk
         if content_emitted:
-            buffered_text = content_buffer.getvalue()
+            buffered_text = _sanitize_multimodal_sql_content(
+                content_buffer.getvalue(),
+                required_outputs=list(state.get("required_outputs") or []),
+            )
             if buffered_text:
                 async for chunk in UniversalHubStreamAdapter.to_openai_sse(
                     _single_skill_event(SkillEvent(event_type="content", data={"text": buffered_text})),
@@ -1073,6 +1110,45 @@ def _skill_event_text(event: SkillEvent) -> str:
             if value:
                 return str(value)
     return ""
+
+
+def _is_multimodal_worker_process_event(event: SkillEvent) -> bool:
+    text = _skill_event_text(event)
+    return event.event_type == "process" and any(
+        marker in text
+        for marker in (
+            "正在绑定 SQL 证据",
+            "正在生成校园大屏可视化插图",
+            "正在根据校园分析痕迹动态编排 PPT",
+            "正在投递至阿里云百炼",
+        )
+    )
+
+
+def _sanitize_multimodal_sql_content(text: str, *, required_outputs: list[str]) -> str:
+    if not (set(required_outputs) & set(prompt_domains.MULTIMODAL_TEMPORARY_SLOTS)):
+        return text
+    lines: list[str] = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") and any(word in stripped for word in ("插图", "图片", "生图", "绘图")):
+            break
+        if any(
+            marker in stripped
+            for marker in (
+                "当前环境暂不支持",
+                "没有可用的图片生成工具",
+                "暂无可用的图片生成工具",
+                "无法直接生成",
+                "无法为您生成管理插图",
+                "暂时无法为您生成",
+                "后续需要生成",
+                "支持图片生成的环境",
+            )
+        ):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _looks_like_hub_final_state(value: dict[str, Any]) -> bool:

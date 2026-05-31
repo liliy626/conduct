@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Sequence
-from typing import Dict
+from dataclasses import dataclass
+from typing import Any, Dict
 
 IMAGE_STYLE_THEMES = {
     "default": "专业校园管理大屏插图，明亮、干净、克制的运营看板风格",
@@ -119,6 +119,7 @@ def render_triple_axis_prompt(
     purpose: str,
     tables: list[str],
     row_count: int,
+    data_rows: Sequence[dict[str, Any]] | None = None,
     style_themes: dict[str, str],
     style_router_matrix: dict[str, tuple[str, ...]],
     entity_contexts: dict[str, str],
@@ -134,8 +135,30 @@ def render_triple_axis_prompt(
         analytic_goal=ANALYTIC_GOAL_LABELS[analytic_goal_key],
         style_theme=style_themes[style_key],
         entity_context=entity_contexts[entity_key].format(purpose=purpose),
-        data_signal=f"已审计校园数据表，真实记录数：{int(row_count or 0)}",
+        data_signal=_image_data_signal(row_count=int(row_count or 0), data_rows=data_rows),
     )
+
+
+def _image_data_signal(*, row_count: int, data_rows: Sequence[dict[str, Any]] | None) -> str:
+    rows = [row for row in (data_rows or []) if isinstance(row, dict)]
+    if not rows:
+        return f"已审计校园数据表，真实记录数：{row_count}。没有明细数据时，禁止写“未提供数据”，只展示已审计记录数。"
+    snippets = [
+        "，".join(
+            f"{str(key)}：{_compact_visual_value(value)}"
+            for key, value in list(row.items())[:5]
+            if _compact_visual_value(value)
+        )
+        for row in rows[:5]
+    ]
+    compact_rows = "；".join(item for item in snippets if item)
+    return f"已审计校园数据表，真实记录数：{row_count}。真实数据明细：{compact_rows}。必须只使用这些数值，禁止写“未提供数据”。"
+
+
+def _compact_visual_value(value: Any) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
 
 
 def resolve_required_outputs(user_query: str, current_outputs: list[str]) -> list[str]:

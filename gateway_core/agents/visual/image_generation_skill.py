@@ -59,6 +59,7 @@ class ImageGenerationSkill(BaseMultimodalAgentSkill):
             purpose=purpose,
             tables=tables,
             row_count=row_count,
+            data_rows=_lineage_data_rows(evidence),
         )
         prompt = f"{prompt}\n数据指纹：已绑定。"
         yield SkillEvent(event_type="process", data={"text": "正在生成校园大屏可视化插图...\n"})
@@ -153,6 +154,17 @@ def _lineage_tables(lineage: dict[str, Any]) -> list[str]:
     return [str(item).strip() for item in lineage.get("tables_used", []) if str(item).strip()]
 
 
+def _lineage_data_rows(lineage: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in ("row_sample", "data_rows", "display_rows", "preview_rows"):
+        rows = lineage.get(key)
+        if isinstance(rows, list):
+            return [dict(item) for item in rows[:5] if isinstance(item, dict)]
+    summary = lineage.get("evidence_summary")
+    if isinstance(summary, dict) and isinstance(summary.get("row_sample"), list):
+        return [dict(item) for item in summary["row_sample"][:5] if isinstance(item, dict)]
+    return []
+
+
 def _primary_sql_lineage(lineages: list[dict[str, Any]]) -> dict[str, Any]:
     for lineage in reversed(lineages):
         if _lineage_row_count(lineage) > 0 and _lineage_tables(lineage):
@@ -231,8 +243,8 @@ def _generate_image(
 
 
 def _image_timeout_sec(ctx: RuntimeContext | dict[str, Any]) -> float:
-    raw = ctx.get("image_timeout_sec") or os.getenv("UNIVERSAL_HUB_IMAGE_TIMEOUT_SEC", "45")
+    raw = ctx.get("image_timeout_sec") or os.getenv("UNIVERSAL_HUB_IMAGE_TIMEOUT_SEC", "120")
     try:
-        return max(0.001, min(float(raw or 45), 120.0))
+        return max(0.001, min(float(raw or 120), 120.0))
     except (TypeError, ValueError):
-        return 45.0
+        return 120.0
