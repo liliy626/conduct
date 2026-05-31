@@ -59,7 +59,7 @@ class ImageGenerationSkill(BaseMultimodalAgentSkill):
             purpose=purpose,
             tables=tables,
             row_count=row_count,
-            data_rows=_lineage_data_rows(evidence),
+            answer_context=_latest_answer_context(state, fallback=purpose),
         )
         prompt = f"{prompt}\n数据指纹：已绑定。"
         yield SkillEvent(event_type="process", data={"text": "正在生成校园大屏可视化插图...\n"})
@@ -154,18 +154,10 @@ def _lineage_tables(lineage: dict[str, Any]) -> list[str]:
     return [str(item).strip() for item in lineage.get("tables_used", []) if str(item).strip()]
 
 
-def _lineage_data_rows(lineage: dict[str, Any]) -> list[dict[str, Any]]:
-    for key in ("row_sample", "top_items", "data_rows", "display_rows", "preview_rows"):
-        rows = lineage.get(key)
-        if isinstance(rows, list):
-            return [dict(item) for item in rows[:5] if isinstance(item, dict)]
-    summary = lineage.get("evidence_summary")
-    if isinstance(summary, dict):
-        for key in ("row_sample", "top_items"):
-            rows = summary.get(key)
-            if isinstance(rows, list):
-                return [dict(item) for item in rows[:5] if isinstance(item, dict)]
-    return []
+def _latest_answer_context(state: UniversalAgentState, *, fallback: str) -> str:
+    meta_context = state.get("meta_context") or {}
+    text = str(meta_context.get("latest_answer_context") or "").strip()
+    return text or str(fallback or "校园数据分析").strip()
 
 
 def _primary_sql_lineage(lineages: list[dict[str, Any]]) -> dict[str, Any]:

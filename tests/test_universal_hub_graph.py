@@ -274,6 +274,7 @@ def test_universal_hub_graph_dispatches_missing_output_to_registered_skill() -> 
     assert final_state["skill_call_count"] == 1
     assert isinstance(final_state["messages"][-1], AIMessage)
     assert final_state["messages"][-1].content == "fake data evidence ready"
+    assert final_state["meta_context"]["latest_answer_context"] == "fake data evidence ready"
     assert _FakeDataSkill.calls
     assert "runtime_ctx" not in final_state
     assert "runtime_marker" not in final_state["session_context"]
@@ -357,6 +358,7 @@ def test_skill_runner_collapses_many_content_chunks_into_one_message() -> None:
     assert isinstance(final_state["messages"][-1], AIMessage)
     assert final_state["messages"][-1].content.startswith("chunk-0;chunk-1;")
     assert "chunk-99;" in final_state["messages"][-1].content
+    assert final_state["meta_context"]["latest_answer_context"].startswith("chunk-0;chunk-1;")
 
 
 def test_visual_query_runs_data_then_image_and_passes_sql_lineage() -> None:

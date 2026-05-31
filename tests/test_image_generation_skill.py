@@ -107,6 +107,7 @@ def test_image_generation_skill_contract_and_lineage_lock() -> None:
         "artifact_refs": [],
         "multimodal_artifacts": {},
         "meta_context": {
+            "latest_answer_context": "结论：7年级眼保健操纪律风险最高，共发现11条重点记录。",
             "executed_sql_lineage": [
                 {
                     "sql_hash": SQL_HASH,
@@ -152,6 +153,7 @@ def test_image_generation_skill_rejects_untrusted_artifact_url() -> None:
         "artifact_refs": [],
         "multimodal_artifacts": {},
         "meta_context": {
+            "latest_answer_context": "结论：7年级眼保健操纪律风险最高，共发现11条重点记录。",
             "executed_sql_lineage": [
                 {
                     "sql_hash": SQL_HASH,
@@ -237,11 +239,11 @@ def test_image_generation_skill_prefers_non_empty_sql_lineage() -> None:
     payload = events[-1].data["payload"]
 
     assert payload["linked_sql_hash"] == non_empty_hash
-    assert "真实记录数：73" in payload["prompt_used"]
-    assert "已审计校园数据表" in payload["prompt_used"]
+    assert "用户原始问题" in payload["prompt_used"]
+    assert "最终回答结论" in payload["prompt_used"]
 
 
-def test_image_generation_skill_prompt_includes_real_row_sample_values() -> None:
+def test_image_generation_skill_prompt_uses_final_answer_context_not_row_sample() -> None:
     from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
 
     state = {
@@ -252,6 +254,7 @@ def test_image_generation_skill_prompt_includes_real_row_sample_values() -> None
         "artifact_refs": [],
         "multimodal_artifacts": {},
         "meta_context": {
+            "latest_answer_context": "结论：7年级本周眼保健操纪律最差，总扣分5分，需要重点提醒。",
             "executed_sql_lineage": [
                 {
                     "sql_hash": SQL_HASH,
@@ -278,13 +281,13 @@ def test_image_generation_skill_prompt_includes_real_row_sample_values() -> None
 
     payload = asyncio.run(collect())[-1].data["payload"]
 
-    assert "6年级" in payload["prompt_used"]
-    assert "总扣分：2" in payload["prompt_used"]
-    assert "违纪次数：2" in payload["prompt_used"]
-    assert "禁止写“未提供数据”" in payload["prompt_used"]
+    assert "把眼保健操纪律最差的年级画成警示图" in payload["prompt_used"]
+    assert "结论：7年级本周眼保健操纪律最差，总扣分5分，需要重点提醒。" in payload["prompt_used"]
+    assert "6年级" not in payload["prompt_used"]
+    assert "总扣分：2" not in payload["prompt_used"]
 
 
-def test_image_generation_skill_prompt_uses_aggregate_top_items() -> None:
+def test_image_generation_skill_prompt_uses_answer_context_not_aggregate_top_items() -> None:
     from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
 
     state = {
@@ -295,6 +298,7 @@ def test_image_generation_skill_prompt_uses_aggregate_top_items() -> None:
         "artifact_refs": [],
         "multimodal_artifacts": {},
         "meta_context": {
+            "latest_answer_context": "结论：教师请假排行已完成，最高请假次数为8次，总体呈现头部集中。",
             "executed_sql_lineage": [
                 {
                     "sql_hash": SQL_HASH,
@@ -323,9 +327,10 @@ def test_image_generation_skill_prompt_uses_aggregate_top_items() -> None:
 
     payload = asyncio.run(collect())[-1].data["payload"]
 
-    assert "张老师" in payload["prompt_used"]
-    assert "请假次数：8" in payload["prompt_used"]
-    assert "总请假时长_小时：32.5" in payload["prompt_used"]
+    assert "本学期全校教师请假概况如何？生成一张纯中文管理图" in payload["prompt_used"]
+    assert "结论：教师请假排行已完成，最高请假次数为8次，总体呈现头部集中。" in payload["prompt_used"]
+    assert "张老师" not in payload["prompt_used"]
+    assert "总请假时长_小时：32.5" not in payload["prompt_used"]
 
 
 def test_sql_lineage_preserves_limited_row_sample_for_visual_workers() -> None:
@@ -689,6 +694,7 @@ def test_image_generation_skill_uses_openai_provider_and_artifact_store(tmp_path
         "artifact_refs": [],
         "multimodal_artifacts": {},
         "meta_context": {
+            "latest_answer_context": "结论：7年级眼保健操纪律风险最高，共发现11条重点记录。",
             "executed_sql_lineage": [
                 {
                     "sql_hash": SQL_HASH,
@@ -855,12 +861,13 @@ def test_triple_axis_prompt_synthesizer_aligns_style_entity_and_data() -> None:
         purpose="眼保健操违纪扣分分析",
         tables=["zx_mlh.行规检查_行规检查"],
         row_count=11,
+        answer_context="结论：7年级纪律风险最高，需要重点关注。",
     )
 
     assert IMAGE_STYLE_THEMES["warning"] in prompt
     assert "学生行为规范与日常检查看板" in prompt
-    assert "真实记录数：11" in prompt
-    assert "已审计校园数据表" in prompt
+    assert "用户原始问题" in prompt
+    assert "最终回答结论：结论：7年级纪律风险最高，需要重点关注。" in prompt
 
 
 def test_triple_axis_prompt_synthesizer_uses_simplified_chinese_goal_and_style_contract() -> None:
@@ -871,11 +878,12 @@ def test_triple_axis_prompt_synthesizer_uses_simplified_chinese_goal_and_style_c
         purpose="男女请假比例排行",
         tables=["zx_mlh.教师销假_请假明细"],
         row_count=20,
+        answer_context="结论：男女请假比例已完成统计，女教师占比较高。",
     )
 
     assert "绘图员工明确指令" in prompt
     assert "用户分析目标：比例与分布分析" in prompt
-    assert "真实数据来源：已审计校园数据表" in prompt
+    assert "最终回答结论：结论：男女请假比例已完成统计，女教师占比较高。" in prompt
     assert "苹果极简设计语言" in prompt
     assert "飞书企业应用布局" in prompt
     assert "只能使用清晰、现代、规整的简体中文字体" in prompt
@@ -886,13 +894,13 @@ def test_triple_axis_prompt_synthesizer_uses_simplified_chinese_goal_and_style_c
 def test_visual_prompt_sanitizer_keeps_structured_chinese_prompt_sections() -> None:
     from gateway_core.tools.privacy import sanitize_visual_prompt
 
-    prompt = "用户原始诉求：眼保健操违纪扣分分析\n真实数据来源：已审计校园数据表，真实记录数：11"
+    prompt = "用户原始问题：眼保健操违纪扣分分析\n最终回答结论：7年级风险最高"
 
     sanitized = sanitize_visual_prompt(prompt)
 
     assert "多人名单" not in sanitized
     assert "眼保健操违纪扣分分析" in sanitized
-    assert "真实数据来源" in sanitized
+    assert "最终回答结论" in sanitized
 
 
 def test_prompt_synthesizer_uses_centralized_master_template(monkeypatch) -> None:
@@ -901,7 +909,7 @@ def test_prompt_synthesizer_uses_centralized_master_template(monkeypatch) -> Non
     monkeypatch.setattr(
         prompt_synthesizer,
         "IMAGE_MASTER_TEMPLATE",
-        "STYLE={style_theme}; ENTITY={entity_context}; DATA={data_signal}; CENTRALIZED",
+        "STYLE={style_theme}; ENTITY={entity_context}; QUESTION={user_goal_text}; ANSWER={answer_context}; CENTRALIZED",
     )
 
     prompt = prompt_synthesizer.TripleAxisPromptSynthesizer.synthesize(
@@ -909,6 +917,7 @@ def test_prompt_synthesizer_uses_centralized_master_template(monkeypatch) -> Non
         purpose="眼保健操违纪扣分分析",
         tables=["zx_mlh.行规检查_行规检查"],
         row_count=11,
+        answer_context="结论：7年级风险最高。",
     )
 
     assert "CENTRALIZED" in prompt
@@ -928,11 +937,12 @@ def test_prompt_synthesizer_routes_by_configured_matrices(monkeypatch) -> None:
         purpose="午休纪律分析",
         tables=["zx_mlh.行规检查_行规检查"],
         row_count=7,
+        answer_context="结论：午休纪律整体平稳。",
     )
 
     assert "舒缓绿色校园修复风格" in prompt
     assert "学生午休纪律看板" in prompt
-    assert "真实记录数：7" in prompt
+    assert "结论：午休纪律整体平稳。" in prompt
 
 
 def test_prompt_synthesizer_router_functions_have_no_explicit_if_branches() -> None:
@@ -987,6 +997,7 @@ def test_image_generation_skill_passes_triple_axis_prompt_to_openai(tmp_path, mo
         "artifact_refs": [],
         "multimodal_artifacts": {},
         "meta_context": {
+            "latest_answer_context": "结论：7年级眼保健操纪律风险最高，共发现11条重点记录。",
             "executed_sql_lineage": [
                 {
                     "sql_hash": SQL_HASH,
@@ -1012,7 +1023,8 @@ def test_image_generation_skill_passes_triple_axis_prompt_to_openai(tmp_path, mo
     prompt = events[-1].data["payload"]["prompt_used"]
     assert "警示型行政数据图" in prompt
     assert "学生行为规范与日常检查看板" in prompt
-    assert "真实记录数：11" in prompt
+    assert "结论：7年级眼保健操纪律风险最高，共发现11条重点记录。" in prompt
+    assert "真实记录数：11" not in prompt
     assert "数据指纹：已绑定" in calls[0]["prompt"]
     assert not __import__("re").search(r"[A-Za-z]", calls[0]["prompt"])
 

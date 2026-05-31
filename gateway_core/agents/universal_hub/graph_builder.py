@@ -234,15 +234,18 @@ def _make_skill_runner_node(registry: Mapping[str, SkillSpec]):
             if event.event_type in {"evidence", "evidence_completed"}:
                 sql_lineages.extend(_sql_lineages_from_event_data(event.data))
 
+        meta_context = dict(state.get("meta_context") or {})
         if content_pieces:
-            messages.append(AIMessage(content="".join(content_pieces)))
+            answer_text = "".join(content_pieces)
+            messages.append(AIMessage(content=answer_text))
+            if "data_evidence" in spec.outputs:
+                meta_context["latest_answer_context"] = _clip_answer_context(answer_text)
 
         completed = list(state.get("completed_outputs", []))
         for output in sorted(spec.outputs):
             if output not in completed:
                 completed.append(output)
 
-        meta_context = dict(state.get("meta_context") or {})
         sql_lineages.extend(_runtime_sql_lineages(runtime_ctx))
         sql_lineages = _dedupe_sql_lineages(sql_lineages)
         if sql_lineages:
@@ -258,6 +261,11 @@ def _make_skill_runner_node(registry: Mapping[str, SkillSpec]):
         )
 
     return skill_runner_node
+
+
+def _clip_answer_context(answer_text: str, max_chars: int = 4000) -> str:
+    text = str(answer_text or "").strip()
+    return text[:max_chars]
 
 
 def compile_universal_hub_graph(skill_registry: Mapping[str, SkillSpec] | None = None):

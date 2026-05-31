@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
-
 from langchain_core.messages import BaseMessage
 
 from gateway_core.prompts.prompt_domains import (
@@ -26,14 +24,14 @@ class TripleAxisPromptSynthesizer:
         purpose: str,
         tables: list[str],
         row_count: int,
-        data_rows: Sequence[dict[str, Any]] | None = None,
+        answer_context: str = "",
     ) -> str:
         return render_triple_axis_prompt(
             history_messages=history_messages,
             purpose=purpose,
             tables=tables,
             row_count=row_count,
-            data_rows=data_rows,
+            answer_context=answer_context,
             style_themes=IMAGE_STYLE_THEMES,
             style_router_matrix=STYLE_ROUTER_MATRIX,
             entity_contexts=IMAGE_ENTITY_CONTEXTS,

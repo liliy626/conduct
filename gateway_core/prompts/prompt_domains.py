@@ -45,9 +45,9 @@ ANALYTIC_GOAL_ROUTER_MATRIX = {
 
 IMAGE_MASTER_TEMPLATE = (
     "【绘图员工明确指令】\n"
-    "用户原始诉求：{user_goal_text}\n"
+    "用户原始问题：{user_goal_text}\n"
+    "最终回答结论：{answer_context}\n"
     "用户分析目标：{analytic_goal}\n"
-    "真实数据来源：{data_signal}\n\n"
     "【画面主题】\n"
     "{style_theme}，{entity_context}。\n\n"
     "【视觉与设计规范】\n"
@@ -100,6 +100,28 @@ def _flatten_recent_message_text(history_messages: Sequence[object]) -> str:
     ).lower()
 
 
+def _message_content_text(content: object) -> str:
+    if isinstance(content, list):
+        return " ".join(str(item) for item in content)
+    return str(content or "")
+
+
+def _latest_user_message_text(history_messages: Sequence[object], fallback: str) -> str:
+    for message in reversed(list(history_messages)):
+        role = str(getattr(message, "type", "") or getattr(message, "role", "") or "").lower()
+        if role in {"human", "user"}:
+            text = _message_content_text(getattr(message, "content", ""))
+            if text.strip():
+                return text.strip()
+        if isinstance(message, dict):
+            role = str(message.get("role") or message.get("type") or "").lower()
+            if role in {"human", "user"}:
+                text = _message_content_text(message.get("content"))
+                if text.strip():
+                    return text.strip()
+    return str(fallback or ANALYTIC_GOAL_LABELS["default"]).strip() or ANALYTIC_GOAL_LABELS["default"]
+
+
 def _route_matrix_key(text: str, matrix: dict[str, tuple[str, ...]], default: str = "default") -> str:
     return max(
         [(0, default)]
@@ -119,7 +141,7 @@ def render_triple_axis_prompt(
     purpose: str,
     tables: list[str],
     row_count: int,
-    data_rows: Sequence[dict[str, Any]] | None = None,
+    answer_context: str = "",
     style_themes: dict[str, str],
     style_router_matrix: dict[str, tuple[str, ...]],
     entity_contexts: dict[str, str],
@@ -127,38 +149,18 @@ def render_triple_axis_prompt(
     master_template: str,
 ) -> str:
     full_text = _flatten_recent_message_text(history_messages)
-    style_key = _route_matrix_key(full_text, style_router_matrix)
-    entity_key = _route_matrix_key(f"{full_text} {purpose}".lower(), entity_router_matrix)
-    analytic_goal_key = _route_matrix_key(f"{full_text} {purpose}".lower(), ANALYTIC_GOAL_ROUTER_MATRIX)
+    answer_text = str(answer_context or purpose or "").strip()
+    routing_text = f"{full_text} {purpose} {answer_text}".lower()
+    style_key = _route_matrix_key(routing_text, style_router_matrix)
+    entity_key = _route_matrix_key(routing_text, entity_router_matrix)
+    analytic_goal_key = _route_matrix_key(routing_text, ANALYTIC_GOAL_ROUTER_MATRIX)
     return master_template.format(
-        user_goal_text=str(purpose or ANALYTIC_GOAL_LABELS["default"]).strip() or ANALYTIC_GOAL_LABELS["default"],
+        user_goal_text=_latest_user_message_text(history_messages, purpose),
+        answer_context=answer_text or "本轮尚未形成可视化结论，请仅画通用校园管理插图。",
         analytic_goal=ANALYTIC_GOAL_LABELS[analytic_goal_key],
         style_theme=style_themes[style_key],
         entity_context=entity_contexts[entity_key].format(purpose=purpose),
-        data_signal=_image_data_signal(row_count=int(row_count or 0), data_rows=data_rows),
     )
-
-
-def _image_data_signal(*, row_count: int, data_rows: Sequence[dict[str, Any]] | None) -> str:
-    rows = [row for row in (data_rows or []) if isinstance(row, dict)]
-    if not rows:
-        return f"已审计校园数据表，真实记录数：{row_count}。没有明细数据时，禁止写“未提供数据”，只展示已审计记录数。"
-    snippets = [
-        "，".join(
-            f"{str(key)}：{_compact_visual_value(value)}"
-            for key, value in list(row.items())[:5]
-            if _compact_visual_value(value)
-        )
-        for row in rows[:5]
-    ]
-    compact_rows = "；".join(item for item in snippets if item)
-    return f"已审计校园数据表，真实记录数：{row_count}。真实数据明细：{compact_rows}。必须只使用这些数值，禁止写“未提供数据”。"
-
-
-def _compact_visual_value(value: Any) -> str:
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value).strip()
 
 
 def resolve_required_outputs(user_query: str, current_outputs: list[str]) -> list[str]:
