@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Dict
 
 IMAGE_STYLE_THEMES = {
@@ -55,7 +56,8 @@ class RequiredOutputRule:
     outputs: tuple[str, ...]
 
 
-TEMPORARY_OUTPUT_SLOTS = frozenset({"image_artifact"})
+MULTIMODAL_TEMPORARY_SLOTS = frozenset({"image_artifact"})
+TEMPORARY_OUTPUT_SLOTS = MULTIMODAL_TEMPORARY_SLOTS
 
 REQUIRED_OUTPUT_RULES = (
     RequiredOutputRule(
@@ -63,6 +65,66 @@ REQUIRED_OUTPUT_RULES = (
         outputs=("data_evidence", "image_artifact"),
     ),
 )
+
+
+def _flatten_recent_message_text(history_messages: Sequence[object]) -> str:
+    return " ".join(
+        str(item)
+        for content in (getattr(message, "content", "") for message in list(history_messages)[-6:])
+        for item in (content if isinstance(content, list) else [content])
+    ).lower()
+
+
+def _route_matrix_key(text: str, matrix: dict[str, tuple[str, ...]], default: str = "default") -> str:
+    return max(
+        [(0, default)]
+        + [
+            (len(str(word)), key)
+            for key, words in matrix.items()
+            for word in words
+            if str(word) and str(word) in text
+        ],
+        key=lambda item: item[0],
+    )[1]
+
+
+def render_triple_axis_prompt(
+    *,
+    history_messages: Sequence[object],
+    purpose: str,
+    tables: list[str],
+    row_count: int,
+    style_themes: dict[str, str],
+    style_router_matrix: dict[str, tuple[str, ...]],
+    entity_contexts: dict[str, str],
+    entity_router_matrix: dict[str, tuple[str, ...]],
+    master_template: str,
+) -> str:
+    full_text = _flatten_recent_message_text(history_messages)
+    style_key = _route_matrix_key(full_text, style_router_matrix)
+    entity_key = _route_matrix_key(f"{full_text} {purpose}".lower(), entity_router_matrix)
+    table_text = (", ".join(tables[:3]), "audited school data")[not bool(tables)]
+    return master_template.format(
+        style_theme=style_themes[style_key],
+        entity_context=entity_contexts[entity_key].format(purpose=purpose),
+        data_signal=f"accurately visualizing {row_count} real-time data records registered in table '{table_text}'",
+    )
+
+
+def resolve_required_outputs(user_query: str, current_outputs: list[str]) -> list[str]:
+    query = str(user_query or "").strip().lower()
+    base_outputs = tuple(
+        output for output in dict.fromkeys(current_outputs) if output not in TEMPORARY_OUTPUT_SLOTS
+    )
+    triggered_outputs = tuple(
+        output
+        for rule in REQUIRED_OUTPUT_RULES
+        for output in rule.outputs
+        if any(keyword in query for keyword in rule.keywords)
+    )
+    required_set = set(base_outputs) | set(triggered_outputs)
+    ordered_outputs = tuple(dict.fromkeys((*base_outputs, *triggered_outputs)))
+    return [output for output in ordered_outputs if output in required_set]
 
 
 def render_image_markdown(payload: dict) -> str:

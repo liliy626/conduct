@@ -41,3 +41,14 @@ SKILL_REGISTRY: dict[str, SkillSpec] = {
         default_model_role="visual_agent",
     ),
 }
+
+
+def mandatory_candidate_skill_names(required: frozenset[str], completed: frozenset[str]) -> list[str]:
+    missing_outputs = frozenset(required).difference(completed)
+    if not missing_outputs:
+        return ["FINISH"]
+    return [
+        skill_name
+        for skill_name, spec in SKILL_REGISTRY.items()
+        if spec.outputs.intersection(missing_outputs)
+    ]

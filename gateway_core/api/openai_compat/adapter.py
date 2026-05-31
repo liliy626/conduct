@@ -21,69 +21,22 @@ class UniversalHubStreamAdapter:
         include_done: bool = True,
     ) -> AsyncIterator[str]:
         async for event in skill_event_stream:
-            if event.event_type == "process":
-                text = _event_text(event.data)
-                if text:
-                    yield _chunk(
-                        model_id=model_id,
-                        completion_id=completion_id,
-                        delta={"reasoning_content": text, "role": "assistant"},
-                    )
-            elif event.event_type == "content":
-                text = _event_text(event.data)
-                if text:
-                    yield _chunk(
-                        model_id=model_id,
-                        completion_id=completion_id,
-                        delta={"content": text, "role": "assistant"},
-                    )
-            elif event.event_type == "artifact":
-                content = _artifact_markdown(event.data)
-                if content:
-                    yield _chunk(
-                        model_id=model_id,
-                        completion_id=completion_id,
-                        delta={"content": content, "role": "assistant"},
-                    )
-            elif event.event_type == "evidence":
-                sources = _event_sources(event.data)
-                if sources:
-                    yield _chunk(
-                        model_id=model_id,
-                        completion_id=completion_id,
-                        delta={"content": "", "role": "assistant"},
-                        sources=sources,
-                    )
-            elif event.event_type == "evidence_completed":
-                artifact_content = _evidence_completed_markdown(event.data)
-                if artifact_content:
-                    yield _chunk(
-                        model_id=model_id,
-                        completion_id=completion_id,
-                        delta={"content": artifact_content, "role": "assistant"},
-                    )
-                sources = _evidence_completed_sources(event.data)
-                if sources:
-                    yield _chunk(
-                        model_id=model_id,
-                        completion_id=completion_id,
-                        delta={"content": "", "role": "assistant"},
-                        sources=sources,
-                    )
-            elif event.event_type in {"tool_start", "tool_end"} and stream_tool_events:
-                text = _tool_event_text(event)
-                if text:
-                    yield _chunk(
-                        model_id=model_id,
-                        completion_id=completion_id,
-                        delta={"reasoning_content": text, "role": "assistant"},
-                    )
+            try:
+                for chunk in _openai_chunks_for_event(
+                    event,
+                    model_id=model_id,
+                    completion_id=completion_id,
+                    stream_tool_events=stream_tool_events,
+                ):
+                    yield chunk
+            finally:
+                del event
         if include_done:
-            yield _end_chunk(model_id=model_id, completion_id=completion_id)
+            yield _to_openai_done_chunk(model_id=model_id, completion_id=completion_id)
             yield "data: [DONE]\n\n"
 
 
-def _chunk(
+def _to_openai_chunk(
     *,
     model_id: str,
     completion_id: str,
@@ -103,7 +56,7 @@ def _chunk(
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def _end_chunk(*, model_id: str, completion_id: str) -> str:
+def _to_openai_done_chunk(*, model_id: str, completion_id: str) -> str:
     payload = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -112,6 +65,60 @@ def _end_chunk(*, model_id: str, completion_id: str) -> str:
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
     }
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _openai_chunks_for_event(
+    event: SkillEvent,
+    *,
+    model_id: str,
+    completion_id: str,
+    stream_tool_events: bool,
+) -> tuple[str, ...]:
+    if event.event_type == "process":
+        return _text_delta_chunks(_event_text(event.data), "reasoning_content", model_id, completion_id)
+    if event.event_type == "content":
+        return _text_delta_chunks(_event_text(event.data), "content", model_id, completion_id)
+    if event.event_type == "artifact":
+        return _text_delta_chunks(_rendered_artifact_markdown(event.data), "content", model_id, completion_id)
+    if event.event_type == "evidence":
+        return _sources_delta_chunks(_event_sources(event.data), model_id, completion_id)
+    if event.event_type == "evidence_completed":
+        return (
+            *_text_delta_chunks(_evidence_completed_markdown(event.data), "content", model_id, completion_id),
+            *_sources_delta_chunks(_evidence_completed_sources(event.data), model_id, completion_id),
+        )
+    if event.event_type in {"tool_start", "tool_end"} and stream_tool_events:
+        return _text_delta_chunks(_tool_event_text(event), "reasoning_content", model_id, completion_id)
+    return ()
+
+
+def _text_delta_chunks(text: str, field: str, model_id: str, completion_id: str) -> tuple[str, ...]:
+    if not text:
+        return ()
+    return (
+        _to_openai_chunk(
+            model_id=model_id,
+            completion_id=completion_id,
+            delta={field: text, "role": "assistant"},
+        ),
+    )
+
+
+def _sources_delta_chunks(
+    sources: list[dict[str, Any]],
+    model_id: str,
+    completion_id: str,
+) -> tuple[str, ...]:
+    if not sources:
+        return ()
+    return (
+        _to_openai_chunk(
+            model_id=model_id,
+            completion_id=completion_id,
+            delta={"content": "", "role": "assistant"},
+            sources=sources,
+        ),
+    )
 
 
 def _event_text(data: Any) -> str:
@@ -134,23 +141,17 @@ def _event_sources(data: Any) -> list[dict[str, Any]]:
     return [item for item in sources if isinstance(item, dict)]
 
 
-def _artifact_markdown(data: Any) -> str:
-    if not isinstance(data, dict):
-        return ""
-    artifact_type = str(data.get("type") or "")
-    url = str(data.get("url") or data.get("download_url") or "")
-    if artifact_type == "image" and url:
-        return f"\n\n![可视化画布]({url})\n\n"
-    return ""
-
-
 def _evidence_completed_markdown(data: Any) -> str:
+    return _rendered_artifact_markdown(data)
+
+
+def _rendered_artifact_markdown(data: Any) -> str:
     if not isinstance(data, dict):
         return ""
     render = prompt_domains.OUTPUT_RENDER_MATRIX.get(str(data.get("type") or ""))
     if render is None:
         return ""
-    payload = data.get("payload")
+    payload = data.get("payload") or data
     if not isinstance(payload, dict):
         return ""
     return str(render(payload)).strip()

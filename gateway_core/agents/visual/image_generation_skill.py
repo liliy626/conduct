@@ -122,7 +122,7 @@ def _primary_sql_lineage(lineages: list[dict[str, Any]]) -> dict[str, Any]:
     for lineage in reversed(lineages):
         if _lineage_row_count(lineage) > 0:
             return lineage
-    return lineages[-1]
+    return next(reversed(lineages))
 
 
 def _generate_image(

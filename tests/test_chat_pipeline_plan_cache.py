@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 
 def test_canonical_plan_cache_key_includes_tenant_id() -> None:
     from gateway_core.api.openai_compat.chat_pipeline import _canonical_plan_cache_key
@@ -24,6 +26,17 @@ def test_query_normalizer_extracts_tenant_id_from_context_and_payload() -> None:
         "sch_payload_tenant"
     )
     assert QueryNormalizer.extract_tenant_id({}) == "default"
+
+
+def test_canonical_plan_cache_key_delegates_tenant_extraction() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    source = inspect.getsource(chat_pipeline._canonical_plan_cache_key)
+
+    assert "QueryNormalizer.extract_tenant_id" in source
+    assert ".get(\"session_context\"" not in source
+    assert ".get('session_context'" not in source
+    assert "isinstance" not in source
 
 
 def test_canonical_plan_cache_never_uses_bare_slot_key(monkeypatch) -> None:

@@ -191,12 +191,32 @@ def test_temporary_output_slots_are_loaded_from_prompt_domains(monkeypatch) -> N
     assert required == ["data_evidence"]
 
 
+def test_multimodal_temporary_slots_are_declared_outside_graph_builder() -> None:
+    from gateway_core.prompts import prompt_domains
+
+    assert prompt_domains.MULTIMODAL_TEMPORARY_SLOTS == prompt_domains.TEMPORARY_OUTPUT_SLOTS
+
+
 def test_determine_required_outputs_has_no_statement_level_for_or_if() -> None:
     from gateway_core.agents.universal_hub.supervisor_core import determine_required_outputs
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(determine_required_outputs)))
 
     assert not any(isinstance(node, (ast.For, ast.If)) for node in ast.walk(tree))
+    assert not any(
+        isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.comprehension))
+        for node in ast.walk(tree)
+    )
+
+
+def test_graph_builder_has_no_business_specific_skill_or_slot_literals() -> None:
+    import gateway_core.agents.universal_hub.graph_builder as graph_builder
+
+    tree = ast.parse(inspect.getsource(graph_builder))
+    string_constants = {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+
+    assert "image_artifact" not in string_constants
+    assert "school_sql" not in string_constants
 
 
 def test_universal_hub_graph_dispatches_missing_output_to_registered_skill() -> None:

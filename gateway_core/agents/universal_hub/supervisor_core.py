@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from gateway_core.agents.universal_hub.registry import SKILL_REGISTRY
+from gateway_core.agents.universal_hub.registry import mandatory_candidate_skill_names
 from gateway_core.prompts import prompt_domains
 
 
@@ -12,27 +12,8 @@ def determine_required_outputs(user_query: str, current_outputs: list[str]) -> l
     itself to a SQL lineage hash.
     """
 
-    query = str(user_query or "").strip().lower()
-    base_outputs = tuple(
-        output for output in dict.fromkeys(current_outputs) if output not in prompt_domains.TEMPORARY_OUTPUT_SLOTS
-    )
-    triggered_outputs = tuple(
-        output
-        for rule in prompt_domains.REQUIRED_OUTPUT_RULES
-        for output in rule.outputs
-        if any(keyword in query for keyword in rule.keywords)
-    )
-    required_set = set(base_outputs) | set(triggered_outputs)
-    ordered_outputs = tuple(dict.fromkeys((*base_outputs, *triggered_outputs)))
-    return [output for output in ordered_outputs if output in required_set]
+    return prompt_domains.resolve_required_outputs(user_query, current_outputs)
 
 
 def get_mandatory_candidate_skills(required: frozenset[str], completed: frozenset[str]) -> list[str]:
-    missing_outputs = frozenset(required).difference(completed)
-    if not missing_outputs:
-        return ["FINISH"]
-    candidates: list[str] = []
-    for skill_name, spec in SKILL_REGISTRY.items():
-        if spec.outputs.intersection(missing_outputs):
-            candidates.append(skill_name)
-    return candidates
+    return mandatory_candidate_skill_names(required, completed)

@@ -116,6 +116,15 @@ def test_image_generation_skill_prefers_non_empty_sql_lineage() -> None:
     assert "zx_mlh.教师销假_请假明细" in payload["prompt_used"]
 
 
+def test_image_generation_skill_has_no_legacy_prompt_or_blind_tail_lineage() -> None:
+    import gateway_core.agents.visual.image_generation_skill as image_generation_skill
+
+    source = inspect.getsource(image_generation_skill)
+
+    assert "_compile_prompt" not in source
+    assert "lineages[-1]" not in source
+
+
 def test_image_artifact_event_streams_markdown_and_sources() -> None:
     from gateway_core.agents.universal_hub.models import SkillEvent
     from gateway_core.api.openai_compat.adapter import UniversalHubStreamAdapter
@@ -245,6 +254,36 @@ def test_image_artifact_sources_use_output_source_matrix(monkeypatch) -> None:
 
     assert source_payloads[0]["sources"][0]["source"]["name"] == "CUSTOM_SOURCE::img_demo"
     assert source_payloads[0]["sources"][0]["metadata"][0]["image_md5_proof"] == "proof123"
+
+
+def test_adapter_has_no_inline_multimodal_markdown_renderer() -> None:
+    import gateway_core.api.openai_compat.adapter as adapter
+
+    source = inspect.getsource(adapter)
+
+    assert "![可视化画布]" not in source
+    assert 'artifact_type == "image"' not in source
+
+
+def test_stream_adapter_releases_event_payload_with_finally() -> None:
+    from gateway_core.api.openai_compat.adapter import UniversalHubStreamAdapter
+
+    source = inspect.getsource(UniversalHubStreamAdapter.to_openai_sse)
+
+    assert "finally:" in source
+    assert "del event" in source
+
+
+def test_stream_adapter_loop_delegates_openai_frame_building() -> None:
+    from gateway_core.api.openai_compat import adapter
+    from gateway_core.api.openai_compat.adapter import UniversalHubStreamAdapter
+
+    source = inspect.getsource(UniversalHubStreamAdapter.to_openai_sse)
+
+    assert hasattr(adapter, "_to_openai_chunk")
+    assert hasattr(adapter, "_to_openai_done_chunk")
+    assert "for chunk in _openai_chunks_for_event" in source
+    assert "delta={" not in source
 
 
 def test_image_generation_skill_uses_openai_provider_and_artifact_store(tmp_path, monkeypatch) -> None:
@@ -434,6 +473,10 @@ def test_prompt_synthesizer_router_functions_have_no_explicit_if_branches() -> N
     function_source = inspect.getsource(prompt_synthesizer.TripleAxisPromptSynthesizer.synthesize)
     tree = ast.parse(textwrap.dedent(function_source))
     assert not any(isinstance(node, ast.If) for node in ast.walk(tree))
+    assert not any(
+        isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.comprehension))
+        for node in ast.walk(tree)
+    )
 
 
 def test_prompt_synthesizer_exposes_no_private_axis_helpers() -> None:

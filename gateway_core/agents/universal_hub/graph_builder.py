@@ -14,6 +14,7 @@ from gateway_core.agents.universal_hub.models import SkillEvent, SkillSpec
 from gateway_core.agents.universal_hub.registry import SKILL_REGISTRY
 from gateway_core.agents.universal_hub.supervisor_core import determine_required_outputs
 from gateway_core.agents.universal_hub.state import UniversalAgentState
+from gateway_core.prompts import prompt_domains
 
 
 def _candidate_skills(
@@ -153,7 +154,9 @@ def _dedupe_sql_lineages(lineages: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 def _make_supervisor_node(registry: Mapping[str, SkillSpec]):
     async def supervisor_node(state: UniversalAgentState) -> Command:
-        existing_required = list(state.get("required_outputs", []))
+        existing_required = list(
+            set(state.get("required_outputs", [])) - set(prompt_domains.TEMPORARY_OUTPUT_SLOTS)
+        )
         required = determine_required_outputs(_latest_user_text(state), existing_required)
         completed = list(state.get("completed_outputs", []))
         candidates = _candidate_skills(
