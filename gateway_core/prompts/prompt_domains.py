@@ -155,12 +155,71 @@ def render_image_sources(payload: dict) -> list[dict]:
     ]
 
 
+def render_pdf_citation(payload: dict) -> str:
+    file_name = str(payload.get("file_name") or payload.get("artifact_id") or "附件文档")
+    sections = payload.get("extracted_sections") if isinstance(payload.get("extracted_sections"), list) else []
+    lines = [f"\n\n> **[文件审计高光]** 成功溯源政策文档: `{file_name}`"]
+    for section in sections[:2]:
+        if not isinstance(section, dict):
+            continue
+        title = str(section.get("title") or "未命名章节")
+        page = str(section.get("page") or "?")
+        summary = str(section.get("content_summary") or section.get("summary") or "").strip()
+        if summary:
+            lines.append(f"- **{title}** (第 {page} 页): {summary}")
+    return "\n".join(lines) + "\n"
+
+
+def render_pdf_sources(payload: dict) -> list[dict]:
+    pdf_sha256 = str(payload.get("pdf_sha256") or "")
+    file_name = str(payload.get("file_name") or payload.get("artifact_id") or "PDF 附件")
+    return [
+        {
+            "source": {"name": f"附件来源：{file_name}", "url": str(payload.get("download_url") or "")},
+            "document": [f"PDF 片段绑定 SHA-256: {pdf_sha256[:12]}"],
+            "metadata": [{"type": "pdf_artifact", "pdf_sha256": pdf_sha256, "artifact_id": str(payload.get("artifact_id") or "")}],
+        }
+    ]
+
+
+def render_table_snapshot(payload: dict) -> str:
+    linked_table = str(payload.get("linked_table") or payload.get("table_name") or "审计表格")
+    row_count = str(payload.get("row_count") or 0)
+    headers = payload.get("headers") if isinstance(payload.get("headers"), list) else []
+    rows = payload.get("preview_rows") if isinstance(payload.get("preview_rows"), list) else []
+    if not headers or not rows:
+        return f"\n\n**[数据审计快照]** 联动物理数据表: `{linked_table}`，共审计 `{row_count}` 行指标。\n"
+    table = [
+        f"\n\n**[数据审计快照]** `{linked_table}` (共 {row_count} 行):\n",
+        "| " + " | ".join(str(item) for item in headers) + " |",
+        "| " + " | ".join("---" for _ in headers) + " |",
+    ]
+    table.extend("| " + " | ".join(str(item) for item in row) + " |" for row in rows[:3])
+    return "\n".join(table) + "\n"
+
+
+def render_table_sources(payload: dict) -> list[dict]:
+    table_hash = str(payload.get("table_hash") or "")
+    linked_table = str(payload.get("linked_table") or payload.get("table_name") or "Excel 审计快照")
+    return [
+        {
+            "source": {"name": f"Excel 物理审计快照：{linked_table}", "url": str(payload.get("csv_preview_url") or "")},
+            "document": [f"表格快照绑定 Hash: {table_hash[:12]}"],
+            "metadata": [{"type": "table_artifact", "table_hash": table_hash, "artifact_id": str(payload.get("artifact_id") or "")}],
+        }
+    ]
+
+
 OUTPUT_RENDER_MATRIX = {
     "image_artifact": render_image_markdown,
+    "pdf_artifact": render_pdf_citation,
+    "table_artifact": render_table_snapshot,
 }
 
 OUTPUT_SOURCE_MATRIX = {
     "image_artifact": render_image_sources,
+    "pdf_artifact": render_pdf_sources,
+    "table_artifact": render_table_sources,
 }
 
 DOMAIN_CONTEXT_LAYER: Dict[str, str] = {

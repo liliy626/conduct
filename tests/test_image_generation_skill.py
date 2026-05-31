@@ -263,6 +263,68 @@ def test_adapter_has_no_inline_multimodal_markdown_renderer() -> None:
 
     assert "![可视化画布]" not in source
     assert 'artifact_type == "image"' not in source
+    assert "pdf_artifact" not in source
+    assert "table_artifact" not in source
+
+
+def test_adapter_renders_pdf_and_table_artifacts_from_output_matrices() -> None:
+    from gateway_core.agents.universal_hub.models import SkillEvent
+    from gateway_core.api.openai_compat.adapter import UniversalHubStreamAdapter
+
+    async def stream() -> AsyncIterator[SkillEvent]:
+        yield SkillEvent(
+            event_type="evidence_completed",
+            data={
+                "type": "pdf_artifact",
+                "payload": {
+                    "artifact_id": "pdf_policy_001",
+                    "file_name": "教师考勤管理办法.pdf",
+                    "download_url": "https://cdn.example.test/policy.pdf",
+                    "pdf_sha256": "p" * 64,
+                    "extracted_sections": [
+                        {"title": "请假纪律", "page": 7, "content_summary": "无故缺勤需按校纪处理。"}
+                    ],
+                },
+            },
+        )
+        yield SkillEvent(
+            event_type="evidence_completed",
+            data={
+                "type": "table_artifact",
+                "payload": {
+                    "artifact_id": "tbl_leave_001",
+                    "linked_table": "zx_mlh.教师销假_请假明细",
+                    "csv_preview_url": "https://cdn.example.test/leave.csv",
+                    "table_hash": "t" * 64,
+                    "row_count": 20,
+                    "headers": ["教师", "请假次数"],
+                    "preview_rows": [["张三", 3], ["李四", 2]],
+                },
+            },
+        )
+
+    async def collect() -> list[dict[str, Any]]:
+        chunks = [
+            chunk
+            async for chunk in UniversalHubStreamAdapter.to_openai_sse(
+                stream(),
+                model_id="yili-model",
+                completion_id="chatcmpl-multimodal-test",
+                include_done=False,
+            )
+        ]
+        return _json_chunks(chunks)
+
+    payloads = asyncio.run(collect())
+    content = "".join(str(payload["choices"][0]["delta"].get("content", "")) for payload in payloads)
+    sources = [source for payload in payloads for source in payload.get("sources", [])]
+
+    assert "文件审计高光" in content
+    assert "教师考勤管理办法.pdf" in content
+    assert "| 教师 | 请假次数 |" in content
+    assert "| 张三 | 3 |" in content
+    assert any(source["metadata"][0].get("pdf_sha256") == "p" * 64 for source in sources)
+    assert any(source["metadata"][0].get("table_hash") == "t" * 64 for source in sources)
 
 
 def test_stream_adapter_releases_event_payload_with_finally() -> None:
