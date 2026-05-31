@@ -64,6 +64,43 @@ REQUIRED_OUTPUT_RULES = (
     ),
 )
 
+
+def render_image_markdown(payload: dict) -> str:
+    url = str(payload.get("cdn_url") or payload.get("url") or "")
+    return f"\n\n![智能校园大屏分析插图]({url})\n\n" if url else str(payload.get("markdown_render") or "")
+
+
+def render_image_sources(payload: dict) -> list[dict]:
+    artifact_id = str(payload.get("artifact_id") or "image_artifact")
+    linked_sql_hash = str(payload.get("linked_sql_hash") or "")
+    prompt_used = str(payload.get("prompt_used") or "")
+    image_md5_proof = str(payload.get("image_md5_proof") or "")
+    if len(linked_sql_hash) != 64:
+        return []
+    return [
+        {
+            "source": {"name": f"图像生成证据：{artifact_id}", "url": ""},
+            "document": [f"图像资产绑定 SQL Hash: {linked_sql_hash[:12]}。提示词规约: {prompt_used}"],
+            "metadata": [
+                {
+                    "type": "image_artifact",
+                    "artifact_id": artifact_id,
+                    "linked_sql_hash": linked_sql_hash,
+                    "image_md5_proof": image_md5_proof,
+                }
+            ],
+        }
+    ]
+
+
+OUTPUT_RENDER_MATRIX = {
+    "image_artifact": render_image_markdown,
+}
+
+OUTPUT_SOURCE_MATRIX = {
+    "image_artifact": render_image_sources,
+}
+
 DOMAIN_CONTEXT_LAYER: Dict[str, str] = {
     "class_profile": "领域口径：聚焦班级/年级画像，优先输出班级差异、异常指标与可执行建议。",
     "student_profile": "领域口径：聚焦学生个体档案，优先保证姓名/班级/时间信息准确。",

@@ -71,6 +71,7 @@ class ImageGenerationSkill(BaseAgentSkill):
         if not cdn_url:
             yield SkillEvent(event_type="process", data={"text": "生图工具未返回可展示图片地址。\n"})
             return
+        image_md5_proof = hashlib.md5(cdn_url.encode("utf-8")).hexdigest()
 
         artifact = ImageArtifact(
             artifact_id=f"img_{sql_hash[:12]}",
@@ -88,6 +89,7 @@ class ImageGenerationSkill(BaseAgentSkill):
                     "artifact_id": artifact.artifact_id,
                     "markdown_render": f"\n\n![智能校园大屏分析插图]({artifact.cdn_url})\n\n",
                     "linked_sql_hash": artifact.linked_sql_hash,
+                    "image_md5_proof": image_md5_proof,
                     "prompt_used": artifact.prompt_used,
                     "cdn_url": artifact.cdn_url,
                     "status": artifact.status,

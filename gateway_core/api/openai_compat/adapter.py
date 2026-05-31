@@ -5,6 +5,7 @@ import time
 from typing import Any, AsyncIterator
 
 from gateway_core.agents.universal_hub.models import SkillEvent
+from gateway_core.prompts import prompt_domains
 
 
 class UniversalHubStreamAdapter:
@@ -144,41 +145,27 @@ def _artifact_markdown(data: Any) -> str:
 
 
 def _evidence_completed_markdown(data: Any) -> str:
-    if not isinstance(data, dict) or data.get("type") != "image_artifact":
+    if not isinstance(data, dict):
+        return ""
+    render = prompt_domains.OUTPUT_RENDER_MATRIX.get(str(data.get("type") or ""))
+    if render is None:
         return ""
     payload = data.get("payload")
     if not isinstance(payload, dict):
         return ""
-    markdown = str(payload.get("markdown_render") or "").strip()
-    if not markdown:
-        return ""
-    return f"\n\n{markdown}\n\n"
+    return str(render(payload)).strip()
 
 
 def _evidence_completed_sources(data: Any) -> list[dict[str, Any]]:
-    if not isinstance(data, dict) or data.get("type") != "image_artifact":
+    if not isinstance(data, dict):
+        return []
+    render = prompt_domains.OUTPUT_SOURCE_MATRIX.get(str(data.get("type") or ""))
+    if render is None:
         return []
     payload = data.get("payload")
     if not isinstance(payload, dict):
         return []
-    artifact_id = str(payload.get("artifact_id") or "image_artifact")
-    linked_sql_hash = str(payload.get("linked_sql_hash") or "")
-    if len(linked_sql_hash) != 64:
-        return []
-    prompt_used = str(payload.get("prompt_used") or "")
-    return [
-        {
-            "source": {"name": f"图像生成证据：{artifact_id}", "url": ""},
-            "document": [f"图像资产绑定 SQL Hash: {linked_sql_hash[:12]}。提示词规约: {prompt_used}"],
-            "metadata": [
-                {
-                    "type": "image_artifact",
-                    "artifact_id": artifact_id,
-                    "linked_sql_hash": linked_sql_hash,
-                }
-            ],
-        }
-    ]
+    return [source for source in render(payload) if isinstance(source, dict)]
 
 
 def _tool_event_text(event: SkillEvent) -> str:

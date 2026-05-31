@@ -156,6 +156,97 @@ def test_image_artifact_event_streams_markdown_and_sources() -> None:
     assert metadata["linked_sql_hash"] == SQL_HASH
 
 
+def test_image_artifact_event_uses_output_render_matrix(monkeypatch) -> None:
+    from gateway_core.agents.universal_hub.models import SkillEvent
+    from gateway_core.api.openai_compat.adapter import UniversalHubStreamAdapter
+    from gateway_core.prompts import prompt_domains
+
+    monkeypatch.setitem(
+        prompt_domains.OUTPUT_RENDER_MATRIX,
+        "image_artifact",
+        lambda payload: f"\n\nCUSTOM_RENDER::{payload['cdn_url']}\n\n",
+    )
+
+    async def stream() -> AsyncIterator[SkillEvent]:
+        yield SkillEvent(
+            event_type="evidence_completed",
+            data={
+                "type": "image_artifact",
+                "payload": {
+                    "artifact_id": "img_demo",
+                    "cdn_url": "https://cdn.example.test/img_demo.png",
+                    "linked_sql_hash": SQL_HASH,
+                    "prompt_used": "school dashboard illustration",
+                },
+            },
+        )
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in UniversalHubStreamAdapter.to_openai_sse(
+                stream(),
+                model_id="yili-model",
+                completion_id="chatcmpl-image-test",
+                include_done=False,
+            )
+        ]
+
+    payloads = _json_chunks(asyncio.run(collect()))
+    content = "".join(str(payload["choices"][0]["delta"].get("content", "")) for payload in payloads)
+
+    assert "CUSTOM_RENDER::https://cdn.example.test/img_demo.png" in content
+
+
+def test_image_artifact_sources_use_output_source_matrix(monkeypatch) -> None:
+    from gateway_core.agents.universal_hub.models import SkillEvent
+    from gateway_core.api.openai_compat.adapter import UniversalHubStreamAdapter
+    from gateway_core.prompts import prompt_domains
+
+    monkeypatch.setitem(
+        prompt_domains.OUTPUT_SOURCE_MATRIX,
+        "image_artifact",
+        lambda payload: [
+            {
+                "source": {"name": f"CUSTOM_SOURCE::{payload['artifact_id']}", "url": ""},
+                "document": ["custom document"],
+                "metadata": [{"type": "custom_source", "image_md5_proof": payload["image_md5_proof"]}],
+            }
+        ],
+    )
+
+    async def stream() -> AsyncIterator[SkillEvent]:
+        yield SkillEvent(
+            event_type="evidence_completed",
+            data={
+                "type": "image_artifact",
+                "payload": {
+                    "artifact_id": "img_demo",
+                    "cdn_url": "https://cdn.example.test/img_demo.png",
+                    "linked_sql_hash": SQL_HASH,
+                    "image_md5_proof": "proof123",
+                    "prompt_used": "school dashboard illustration",
+                },
+            },
+        )
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in UniversalHubStreamAdapter.to_openai_sse(
+                stream(),
+                model_id="yili-model",
+                completion_id="chatcmpl-image-test",
+                include_done=False,
+            )
+        ]
+
+    source_payloads = [payload for payload in _json_chunks(asyncio.run(collect())) if payload.get("sources")]
+
+    assert source_payloads[0]["sources"][0]["source"]["name"] == "CUSTOM_SOURCE::img_demo"
+    assert source_payloads[0]["sources"][0]["metadata"][0]["image_md5_proof"] == "proof123"
+
+
 def test_image_generation_skill_uses_openai_provider_and_artifact_store(tmp_path, monkeypatch) -> None:
     from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
 
@@ -214,6 +305,7 @@ def test_image_generation_skill_uses_openai_provider_and_artifact_store(tmp_path
     payload = events[-1].data["payload"]
     assert payload["linked_sql_hash"] == SQL_HASH
     assert "/v1/artifacts/sch_zx_mlh/image/" in payload["cdn_url"]
+    assert payload["image_md5_proof"] == __import__("hashlib").md5(payload["cdn_url"].encode("utf-8")).hexdigest()
     assert "![智能校园大屏分析插图](" in payload["markdown_render"]
     assert "/v1/artifacts/sch_zx_mlh/image/" in payload["markdown_render"]
 
