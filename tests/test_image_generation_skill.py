@@ -279,11 +279,13 @@ def test_stream_adapter_loop_delegates_openai_frame_building() -> None:
     from gateway_core.api.openai_compat.adapter import UniversalHubStreamAdapter
 
     source = inspect.getsource(UniversalHubStreamAdapter.to_openai_sse)
+    adapter_source = inspect.getsource(adapter)
 
     assert hasattr(adapter, "_to_openai_chunk")
     assert hasattr(adapter, "_to_openai_done_chunk")
     assert "for chunk in _openai_chunks_for_event" in source
     assert "delta={" not in source
+    assert "delta={" not in adapter_source
 
 
 def test_image_generation_skill_uses_openai_provider_and_artifact_store(tmp_path, monkeypatch) -> None:

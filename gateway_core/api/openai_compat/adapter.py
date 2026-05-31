@@ -40,9 +40,11 @@ def _to_openai_chunk(
     *,
     model_id: str,
     completion_id: str,
-    delta: dict[str, Any],
+    field: str = "content",
+    text: str = "",
     sources: list[dict[str, Any]] | None = None,
 ) -> str:
+    delta = {field: text, "role": "assistant"} if text or not sources else {"content": "", "role": "assistant"}
     payload: dict[str, Any] = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -99,7 +101,8 @@ def _text_delta_chunks(text: str, field: str, model_id: str, completion_id: str)
         _to_openai_chunk(
             model_id=model_id,
             completion_id=completion_id,
-            delta={field: text, "role": "assistant"},
+            field=field,
+            text=text,
         ),
     )
 
@@ -115,7 +118,6 @@ def _sources_delta_chunks(
         _to_openai_chunk(
             model_id=model_id,
             completion_id=completion_id,
-            delta={"content": "", "role": "assistant"},
             sources=sources,
         ),
     )
