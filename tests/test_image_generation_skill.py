@@ -885,6 +885,25 @@ def test_local_artifact_download_url_is_openwebui_reachable(monkeypatch, tmp_pat
     assert artifact_download_url(path).startswith("http://127.0.0.1:8008/v1/artifacts/")
 
 
+def test_artifact_endpoint_supports_browser_head_probe(monkeypatch, tmp_path) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from gateway_core.tools.artifact_endpoints import router
+    from gateway_core.tools.artifact_store import artifact_relative_path, safe_artifact_path
+
+    monkeypatch.setenv("GATEWAY_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    path = safe_artifact_path(tenant_id="sch_zx_mlh", tool_name="image", suffix=".png")
+    path.write_bytes(b"png")
+
+    app = FastAPI()
+    app.include_router(router)
+    url = f"/v1/artifacts/{artifact_relative_path(path)}"
+
+    assert TestClient(app).head(url).status_code == 200
+    assert TestClient(app).get(url).headers["content-type"] == "image/png"
+
+
 def test_ppt_generation_skill_uses_multimodal_contract_and_registered_route() -> None:
     from gateway_core.agents.ppt.ppt_generation_skill import PptGenerationSkill
     from gateway_core.agents.universal_hub.registry import mandatory_candidate_skill_names

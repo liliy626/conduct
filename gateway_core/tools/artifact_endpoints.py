@@ -11,6 +11,7 @@ from .artifact_store import resolve_artifact_path
 router = APIRouter(prefix="/v1/artifacts", tags=["artifacts"])
 
 
+@router.head("/{artifact_path:path}")
 @router.get("/{artifact_path:path}")
 def download_artifact(artifact_path: str) -> FileResponse:
     try:
