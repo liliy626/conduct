@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import gc
+import inspect
 import json
 import time
 from typing import AsyncIterator
@@ -331,6 +333,15 @@ def test_prompt_synthesizer_routes_by_configured_matrices(monkeypatch) -> None:
     assert "Calm green restorative campus style" in prompt
     assert "student lunch break routine dashboard" in prompt
     assert "7 real-time data records" in prompt
+
+
+def test_prompt_synthesizer_router_functions_have_no_explicit_if_branches() -> None:
+    import gateway_core.agents.visual.prompt_synthesizer as prompt_synthesizer
+
+    for function_name in ("_style_axis", "_entity_axis", "_route_key"):
+        function_source = inspect.getsource(getattr(prompt_synthesizer, function_name))
+        tree = ast.parse(function_source)
+        assert not any(isinstance(node, ast.If) for node in ast.walk(tree)), function_name
 
 
 def test_image_generation_skill_passes_triple_axis_prompt_to_openai(tmp_path, monkeypatch) -> None:

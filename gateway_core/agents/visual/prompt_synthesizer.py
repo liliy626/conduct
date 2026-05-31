@@ -61,15 +61,18 @@ def _entity_axis(*, text: str, purpose: str) -> str:
 
 
 def _route_key(text: str, matrix: dict[str, Sequence[str]], *, default_key: str) -> str:
-    matches = [
-        (len(str(word)), key)
-        for key, words in matrix.items()
-        for word in words
-        if str(word) and str(word) in text
-    ]
-    if not matches:
-        return default_key
-    return max(matches, key=lambda item: item[0])[1]
+    return max(
+        [
+            (0, default_key),
+            *[
+                (len(str(word)), key)
+                for key, words in matrix.items()
+                for word in words
+                if str(word) and str(word) in text
+            ],
+        ],
+        key=lambda item: item[0],
+    )[1]
 
 
 def _data_axis(*, tables: list[str], row_count: int) -> str:
