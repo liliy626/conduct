@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
+import textwrap
 from typing import Any, AsyncIterator
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -186,6 +189,14 @@ def test_temporary_output_slots_are_loaded_from_prompt_domains(monkeypatch) -> N
     required = supervisor_core.determine_required_outputs("那上周呢？", ["data_evidence", "custom_artifact"])
 
     assert required == ["data_evidence"]
+
+
+def test_determine_required_outputs_has_no_statement_level_for_or_if() -> None:
+    from gateway_core.agents.universal_hub.supervisor_core import determine_required_outputs
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(determine_required_outputs)))
+
+    assert not any(isinstance(node, (ast.For, ast.If)) for node in ast.walk(tree))
 
 
 def test_universal_hub_graph_dispatches_missing_output_to_registered_skill() -> None:

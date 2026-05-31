@@ -12,18 +12,19 @@ def determine_required_outputs(user_query: str, current_outputs: list[str]) -> l
     itself to a SQL lineage hash.
     """
 
-    outputs = [output for output in dict.fromkeys(current_outputs) if output not in prompt_domains.TEMPORARY_OUTPUT_SLOTS]
     query = str(user_query or "").strip().lower()
-    dynamic_outputs = [
+    base_outputs = tuple(
+        output for output in dict.fromkeys(current_outputs) if output not in prompt_domains.TEMPORARY_OUTPUT_SLOTS
+    )
+    triggered_outputs = tuple(
         output
         for rule in prompt_domains.REQUIRED_OUTPUT_RULES
         for output in rule.outputs
         if any(keyword in query for keyword in rule.keywords)
-    ]
-    for output in dynamic_outputs:
-        if output not in outputs:
-            outputs.append(output)
-    return outputs
+    )
+    required_set = set(base_outputs) | set(triggered_outputs)
+    ordered_outputs = tuple(dict.fromkeys((*base_outputs, *triggered_outputs)))
+    return [output for output in ordered_outputs if output in required_set]
 
 
 def get_mandatory_candidate_skills(required: frozenset[str], completed: frozenset[str]) -> list[str]:
