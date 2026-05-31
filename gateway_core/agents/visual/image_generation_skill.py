@@ -9,6 +9,7 @@ from gateway_core.agents.base_skill import BaseMultimodalAgentSkill, RuntimeCont
 from gateway_core.agents.universal_hub.models import MultimodalOutputContract, SkillEvent
 from gateway_core.agents.universal_hub.state import ImageArtifact, UniversalAgentState
 from gateway_core.agents.visual.prompt_synthesizer import TripleAxisPromptSynthesizer
+from gateway_core.tools.artifact_store import validate_external_artifact_url
 from gateway_core.tools.image_tool import ImageTool
 from gateway_core.tools.tool_core import AgentToolInput, ToolExecutionContext
 
@@ -67,7 +68,11 @@ class ImageGenerationSkill(BaseMultimodalAgentSkill):
             yield SkillEvent(event_type="process", data={"text": f"生图失败：{image_result['error']}\n"})
             return
 
-        cdn_url = str(image_result.get("url") or "")
+        try:
+            cdn_url = validate_external_artifact_url(str(image_result.get("url") or ""))
+        except ValueError as exc:
+            yield SkillEvent(event_type="process", data={"text": f"生图失败：{exc}\n"})
+            return
         if not cdn_url:
             yield SkillEvent(event_type="process", data={"text": "生图工具未返回可展示图片地址。\n"})
             return
@@ -132,7 +137,10 @@ def _generate_image(
 ) -> dict[str, str]:
     factory = ctx.get("image_url_factory")
     if callable(factory):
-        return {"url": str(factory(sql_hash))}
+        try:
+            return {"url": validate_external_artifact_url(str(factory(sql_hash)))}
+        except ValueError as exc:
+            return {"error": str(exc)}
 
     if ctx.get("image_mock_mode", False):
         digest = hashlib.md5(sql_hash.encode("utf-8")).hexdigest()[:16]
@@ -152,7 +160,7 @@ def _generate_image(
             if isinstance(artifact, dict):
                 url = str(artifact.get("download_url") or artifact.get("image_url") or artifact.get("url") or "").strip()
                 if url:
-                    return {"url": url}
+                    return {"url": validate_external_artifact_url(url)}
         return {"error": "image generation returned no artifact"}
     finally:
         del output

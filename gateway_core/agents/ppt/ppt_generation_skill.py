@@ -9,6 +9,7 @@ from typing import Any
 from gateway_core.agents.base_skill import BaseMultimodalAgentSkill, RuntimeContext
 from gateway_core.agents.universal_hub.models import MultimodalOutputContract, SkillEvent
 from gateway_core.agents.universal_hub.state import UniversalAgentState
+from gateway_core.tools.artifact_store import validate_external_artifact_url
 
 
 class PptGenerationSkill(BaseMultimodalAgentSkill):
@@ -28,8 +29,11 @@ class PptGenerationSkill(BaseMultimodalAgentSkill):
         ctx: RuntimeContext | dict[str, Any],
     ) -> AsyncIterator[SkillEvent]:
         yield SkillEvent(event_type="process", data={"text": "正在根据校园分析痕迹动态编排 PPT 幻灯片...\n"})
-        async for event in super().astream(state, ctx):
-            yield event
+        try:
+            async for event in super().astream(state, ctx):
+                yield event
+        except ValueError as exc:
+            yield SkillEvent(event_type="process", data={"text": f"PPT 生成失败：{exc}\n"})
 
     async def _execute_multimodal_core(
         self,
@@ -89,13 +93,15 @@ def _ppt_url(
 ) -> str:
     factory = ctx.get("ppt_url_factory")
     if callable(factory):
-        return str(factory(state))
-    return str(
-        provider_result.get("download_url")
-        or provider_result.get("cdn_url")
-        or provider_result.get("url")
-        or ctx.get("ppt_mock_url")
-        or "https://cdn.yili-edu.com/artifacts/ppt_report_2026.pptx"
+        return validate_external_artifact_url(str(factory(state)))
+    return validate_external_artifact_url(
+        str(
+            provider_result.get("download_url")
+            or provider_result.get("cdn_url")
+            or provider_result.get("url")
+            or ctx.get("ppt_mock_url")
+            or "https://cdn.yili-edu.com/artifacts/ppt_report_2026.pptx"
+        )
     )
 
 

@@ -4,9 +4,17 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import quote
+from urllib.parse import urlparse
 
 
 _SAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_DEFAULT_ALLOWED_ARTIFACT_HOSTS = (
+    "127.0.0.1",
+    "api.openai.com",
+    "cdn.example.test",
+    "cdn.yili-edu.com",
+    "localhost",
+)
 
 
 def artifact_root() -> Path:
@@ -35,6 +43,19 @@ def artifact_download_url(path: str | Path) -> str:
     return f"{base}{url_path}" if base else url_path
 
 
+def validate_external_artifact_url(url: str) -> str:
+    clean = str(url or "").strip()
+    parsed = urlparse(clean)
+    if clean.startswith("/v1/artifacts/"):
+        return clean
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("artifact URL must be an HTTPS URL or local artifact path")
+    host = parsed.hostname.lower()
+    if not any(host == allowed or host.endswith(f".{allowed}") for allowed in _allowed_artifact_hosts()):
+        raise ValueError(f"artifact URL host `{host}` 不在允许域名白名单")
+    return clean
+
+
 def artifact_relative_path(path: str | Path) -> str:
     root = artifact_root().resolve()
     target = Path(path).resolve()
@@ -52,6 +73,17 @@ def resolve_artifact_path(relative_path: str) -> Path:
     except ValueError as exc:
         raise ValueError("artifact path is outside artifact root") from exc
     return target
+
+
+def _allowed_artifact_hosts() -> tuple[str, ...]:
+    configured = os.getenv("GATEWAY_ALLOWED_ARTIFACT_URL_HOSTS", "").strip()
+    if not configured:
+        return _DEFAULT_ALLOWED_ARTIFACT_HOSTS
+    return tuple(
+        host
+        for item in configured.split(",")
+        if (host := item.strip().lower())
+    ) or _DEFAULT_ALLOWED_ARTIFACT_HOSTS
 
 
 def _safe_segment(value: str) -> str:

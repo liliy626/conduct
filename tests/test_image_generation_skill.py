@@ -140,6 +140,43 @@ def test_image_generation_skill_contract_and_lineage_lock() -> None:
     assert state["multimodal_artifacts"] == {}
 
 
+def test_image_generation_skill_rejects_untrusted_artifact_url() -> None:
+    from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
+
+    state = {
+        "messages": [HumanMessage(content="把教师请假排行做成一张管理大屏图")],
+        "session_context": {"school_id": "sch_zx_mlh", "schema_name": "zx_mlh"},
+        "required_outputs": ["image_artifact"],
+        "completed_outputs": ["data_evidence"],
+        "artifact_refs": [],
+        "multimodal_artifacts": {},
+        "meta_context": {
+            "executed_sql_lineage": [
+                {
+                    "sql_hash": SQL_HASH,
+                    "tables_used": ["zx_mlh.教师销假_请假明细"],
+                    "row_count": 20,
+                    "query_purpose": "统计教师请假排行",
+                }
+            ]
+        },
+    }
+
+    async def collect() -> list:
+        return [
+            event
+            async for event in ImageGenerationSkill().astream(
+                state,
+                ctx={"image_latency_sec": 0, "image_url_factory": lambda _hash: "https://evil.example.test/img.png"},
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert [event.event_type for event in events] == ["process", "process", "process"]
+    assert "不在允许域名" in events[-1].data["text"]
+
+
 def test_image_generation_skill_prefers_non_empty_sql_lineage() -> None:
     from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
 
@@ -836,6 +873,27 @@ def test_ppt_generation_skill_uses_injected_bailian_provider_without_naked_event
     assert payload["title"] == "2026年美兰湖中学【教师请假排行】深层数据审计汇报文稿"
     assert payload["render_engine"] == "阿里云百炼大模型演示文稿组件"
     assert payload["ppt_sha256"] == __import__("hashlib").sha256(payload["cdn_url"].encode("utf-8")).hexdigest()
+
+
+def test_ppt_generation_skill_rejects_untrusted_bailian_url() -> None:
+    from gateway_core.agents.ppt.ppt_generation_skill import PptGenerationSkill
+
+    async def bailian_call(_payload: dict) -> dict:
+        return {"download_url": "https://evil.example.test/report.pptx", "ppt_title": "恶意外链"}
+
+    async def collect() -> list:
+        return [
+            event
+            async for event in PptGenerationSkill().astream(
+                {"messages": [], "session_context": {"school_id": "sch_zx_mlh"}},
+                ctx={"ppt_latency_sec": 0, "bailian_ppt_call": bailian_call},
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert [event.event_type for event in events] == ["process", "process"]
+    assert "不在允许域名" in events[-1].data["text"]
 
 
 def test_ppt_generation_skill_has_no_naked_evidence_completed_dict() -> None:
