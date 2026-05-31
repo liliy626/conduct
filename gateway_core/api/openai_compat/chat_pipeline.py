@@ -57,7 +57,7 @@ from gateway_core.conversation.session_memory import conversation_memory_key, ge
 
 
 CANONICAL_PLAN_CACHE: dict[str, dict[str, Any]] = {
-    "slot:teacher_leave_ranking": {
+    "tenant:sch_zx_mlh:slot:teacher_leave_ranking": {
         "canonical_sqls": [
             """
             SELECT
@@ -389,7 +389,11 @@ async def _run_experimental_shadow_hub(
         context_present=bool(required_outputs),
         cache_hit=False,
     )
-    plan = _canonical_plan_for_question(setup.effective_question, route_name=route_name)
+    plan = _canonical_plan_for_question(
+        setup.effective_question,
+        route_name=route_name,
+        session_context=state["session_context"],
+    )
     if plan is not None:
         if setup.pipeline_ctx.stream:
             return StreamingResponse(
@@ -508,13 +512,23 @@ async def _run_experimental_shadow_hub(
         return JSONResponse(runtime_response_fns.non_stream(setup.spec.model_id, setup.completion_id, text, rt._zero_usage()))
 
 
-def _canonical_plan_for_question(question: str, *, route_name: str) -> dict[str, Any] | None:
+def _canonical_plan_cache_key(question: str, session_context: dict[str, Any] | None) -> str:
+    context = session_context or {}
+    tenant_id = str(context.get("school_id") or context.get("tenant_id") or "default").strip() or "default"
+    return f"tenant:{tenant_id}:{QueryNormalizer.to_canonical_slot(question)}"
+
+
+def _canonical_plan_for_question(
+    question: str,
+    *,
+    route_name: str,
+    session_context: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     if route_name != "universal_hub_ga":
         return None
     if not rt._truthy_env("UNIVERSAL_HUB_PLAN_CACHE_ENABLED", "1"):
         return None
-    slot = QueryNormalizer.to_canonical_slot(question)
-    plan = CANONICAL_PLAN_CACHE.get(slot)
+    plan = CANONICAL_PLAN_CACHE.get(_canonical_plan_cache_key(question, session_context))
     return plan if isinstance(plan, dict) else None
 
 

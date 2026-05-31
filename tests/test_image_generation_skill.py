@@ -278,6 +278,7 @@ def test_image_generation_skill_keeps_event_loop_free_during_openai_write(tmp_pa
 
 def test_triple_axis_prompt_synthesizer_aligns_style_entity_and_data() -> None:
     from gateway_core.agents.visual.prompt_synthesizer import TripleAxisPromptSynthesizer
+    from gateway_core.prompts.prompt_domains import IMAGE_STYLE_THEMES
 
     prompt = TripleAxisPromptSynthesizer.synthesize(
         history_messages=[HumanMessage(content="帮我分析下眼保健操最差的年级，要一张有警示感的管理插图。")],
@@ -286,10 +287,30 @@ def test_triple_axis_prompt_synthesizer_aligns_style_entity_and_data() -> None:
         row_count=11,
     )
 
-    assert "amber and deep orange alert style" in prompt
+    assert IMAGE_STYLE_THEMES["warning"] in prompt
     assert "student behavior discipline" in prompt
     assert "11 real-time data records" in prompt
     assert "zx_mlh.行规检查_行规检查" in prompt
+
+
+def test_prompt_synthesizer_uses_centralized_master_template(monkeypatch) -> None:
+    import gateway_core.agents.visual.prompt_synthesizer as prompt_synthesizer
+
+    monkeypatch.setattr(
+        prompt_synthesizer,
+        "IMAGE_MASTER_TEMPLATE",
+        "STYLE={style_theme}; ENTITY={entity_context}; DATA={data_signal}; CENTRALIZED",
+    )
+
+    prompt = prompt_synthesizer.TripleAxisPromptSynthesizer.synthesize(
+        history_messages=[HumanMessage(content="请做一张警示图")],
+        purpose="眼保健操违纪扣分分析",
+        tables=["zx_mlh.行规检查_行规检查"],
+        row_count=11,
+    )
+
+    assert "CENTRALIZED" in prompt
+    assert prompt.startswith("STYLE=")
 
 
 def test_image_generation_skill_passes_triple_axis_prompt_to_openai(tmp_path, monkeypatch) -> None:

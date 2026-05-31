@@ -5,6 +5,12 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage
 
+from gateway_core.prompts.prompt_domains import (
+    IMAGE_ENTITY_CONTEXTS,
+    IMAGE_MASTER_TEMPLATE,
+    IMAGE_STYLE_THEMES,
+)
+
 
 class TripleAxisPromptSynthesizer:
     """Build image prompts from style intent, entity context, and data evidence."""
@@ -22,10 +28,10 @@ class TripleAxisPromptSynthesizer:
         style_axis = _style_axis(text)
         entity_axis = _entity_axis(text=text, purpose=purpose)
         data_axis = _data_axis(tables=tables, row_count=row_count)
-        return (
-            f"{style_axis}, {entity_axis}, {data_axis}, "
-            "clean executive campus dashboard composition, crisp vector-like UI, "
-            "no invented numbers, no fake people portraits, no dark sci-fi style."
+        return IMAGE_MASTER_TEMPLATE.format(
+            style_theme=style_axis,
+            entity_context=entity_axis,
+            data_signal=data_axis,
         )
 
 
@@ -44,23 +50,23 @@ def _recent_text(history_messages: Sequence[BaseMessage]) -> str:
 
 def _style_axis(text: str) -> str:
     if any(token in text for token in ("警示", "严重", "最差", "问题", "风险", "橙色", "预警")):
-        return "Warning tone administrative infographic, amber and deep orange alert style"
+        return IMAGE_STYLE_THEMES["warning"]
     if any(token in text for token in ("对比", "趋势", "变化", "环比", "同比")):
-        return "Analytical data trend presentation graphic, blue and cyan comparison style"
+        return IMAGE_STYLE_THEMES["analytical"]
     if any(token in text for token in ("汇报", "领导", "校长", "大屏", "驾驶舱")):
-        return "Executive school operations dashboard illustration, polished light BI style"
-    return "Professional school management dashboard illustration, clean light operations style"
+        return IMAGE_STYLE_THEMES["executive"]
+    return IMAGE_STYLE_THEMES["default"]
 
 
 def _entity_axis(*, text: str, purpose: str) -> str:
     combined = f"{text} {purpose}".lower()
     if any(token in combined for token in ("眼保健操", "违纪", "扣分", "行规", "纪律", "德育")):
-        return "student behavior discipline and routine inspection dashboard"
+        return IMAGE_ENTITY_CONTEXTS["student_discipline"]
     if any(token in combined for token in ("老师", "教师", "教研组", "请假", "销假", "假勤")):
-        return "faculty attendance and leave analytics dashboard"
+        return IMAGE_ENTITY_CONTEXTS["faculty"]
     if any(token in combined for token in ("年级", "班级", "学生")):
-        return "student grade and class operations dashboard"
-    return f"campus analytics dashboard about {purpose}"
+        return IMAGE_ENTITY_CONTEXTS["student_grade"]
+    return IMAGE_ENTITY_CONTEXTS["default"].format(purpose=purpose)
 
 
 def _data_axis(*, tables: list[str], row_count: int) -> str:

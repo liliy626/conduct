@@ -2,6 +2,39 @@ from __future__ import annotations
 
 from typing import Dict
 
+IMAGE_STYLE_THEMES = {
+    "default": "Professional school management dashboard illustration, clean light operations style",
+    "warning": "Warning tone administrative infographic, amber and deep orange alert style, clean corporate vectors",
+    "analytical": "Analytical data trend presentation graphic, dark blue tech infographic style, sharp flat design",
+    "executive": "Executive school operations dashboard illustration, polished light BI style",
+}
+
+IMAGE_ENTITY_CONTEXTS = {
+    "default": "campus analytics dashboard about {purpose}",
+    "faculty": "faculty attendance and leave analytics dashboard",
+    "student_discipline": "student behavior discipline and routine inspection dashboard",
+    "student_grade": "student grade and class operations dashboard",
+}
+
+IMAGE_MASTER_TEMPLATE = (
+    "{style_theme}, {entity_context}, {data_signal}, "
+    "clean executive campus dashboard composition, crisp vector-like UI, "
+    "no invented numbers, no fake people portraits, no dark sci-fi style."
+)
+
+VISUAL_INTENT_KEYWORDS = (
+    "图",
+    "画",
+    "插图",
+    "视觉",
+    "大屏",
+    "图表",
+    "可视化",
+    "infographic",
+    "illustration",
+    "chart",
+)
+
 DOMAIN_CONTEXT_LAYER: Dict[str, str] = {
     "class_profile": "领域口径：聚焦班级/年级画像，优先输出班级差异、异常指标与可执行建议。",
     "student_profile": "领域口径：聚焦学生个体档案，优先保证姓名/班级/时间信息准确。",

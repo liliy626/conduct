@@ -1,20 +1,7 @@
 from __future__ import annotations
 
 from gateway_core.agents.universal_hub.registry import SKILL_REGISTRY
-
-
-VISUAL_OUTPUT_KEYWORDS = (
-    "图",
-    "画",
-    "插图",
-    "视觉",
-    "大屏",
-    "图表",
-    "可视化",
-    "infographic",
-    "illustration",
-    "chart",
-)
+from gateway_core.prompts.prompt_domains import VISUAL_INTENT_KEYWORDS
 
 
 def determine_required_outputs(user_query: str, current_outputs: list[str]) -> list[str]:
@@ -27,7 +14,7 @@ def determine_required_outputs(user_query: str, current_outputs: list[str]) -> l
 
     outputs = [output for output in dict.fromkeys(current_outputs) if output != "image_artifact"]
     query = str(user_query or "").strip().lower()
-    if any(keyword in query for keyword in VISUAL_OUTPUT_KEYWORDS):
+    if any(keyword in query for keyword in VISUAL_INTENT_KEYWORDS):
         if "data_evidence" not in outputs:
             outputs.append("data_evidence")
         if "image_artifact" not in outputs:

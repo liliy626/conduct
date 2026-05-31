@@ -156,6 +156,17 @@ def test_non_visual_followup_drops_stale_image_artifact_requirement() -> None:
     assert required == ["data_evidence"]
 
 
+def test_visual_keywords_are_loaded_from_prompt_domains(monkeypatch) -> None:
+    import gateway_core.agents.universal_hub.supervisor_core as supervisor_core
+
+    monkeypatch.setattr(supervisor_core, "VISUAL_INTENT_KEYWORDS", ("画布测试词",))
+
+    assert supervisor_core.determine_required_outputs("请生成画布测试词", ["data_evidence"]) == [
+        "data_evidence",
+        "image_artifact",
+    ]
+
+
 def test_universal_hub_graph_dispatches_missing_output_to_registered_skill() -> None:
     from gateway_core.agents.universal_hub.graph_builder import compile_universal_hub_graph
 
