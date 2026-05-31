@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage
 
 
 SQL_HASH = "a1d11461f1ed8e9063bd83015b67272199859f51ced96d11e8df1ad961234567"
+PDF_HASH = "p" * 64
 
 
 def _json_chunks(chunks: list[str]) -> list[dict]:
@@ -22,6 +23,41 @@ def _json_chunks(chunks: list[str]) -> list[dict]:
             continue
         payloads.append(json.loads(chunk.removeprefix("data: ").strip()))
     return payloads
+
+
+def test_base_multimodal_skill_emits_contract_event_and_proof_key() -> None:
+    from gateway_core.agents.base_skill import BaseMultimodalAgentSkill
+    from gateway_core.agents.universal_hub.models import MultimodalOutputContract
+
+    class _PdfSkill(BaseMultimodalAgentSkill):
+        @property
+        def name(self) -> str:
+            return "pdf_reader"
+
+        @property
+        def provided_outputs(self) -> frozenset[str]:
+            return frozenset({"pdf_artifact"})
+
+        async def _execute_multimodal_core(self, state, ctx) -> MultimodalOutputContract:
+            return MultimodalOutputContract(
+                artifact_type="pdf_artifact",
+                artifact_id="pdf_policy_001",
+                cdn_url="https://cdn.example.test/policy.pdf",
+                crypto_proof=PDF_HASH,
+                meta_payload={"file_name": "教师考勤管理办法.pdf"},
+            )
+
+    async def collect() -> list:
+        return [event async for event in _PdfSkill().astream({}, {})]
+
+    event = asyncio.run(collect())[0]
+    assert event.event_type == "evidence_completed"
+    assert event.data["type"] == "pdf_artifact"
+    assert event.data["payload"]["artifact_id"] == "pdf_policy_001"
+    assert event.data["payload"]["cdn_url"] == "https://cdn.example.test/policy.pdf"
+    assert event.data["payload"]["status"] == "completed"
+    assert event.data["payload"]["pdf_sha256"] == PDF_HASH
+    assert event.data["payload"]["file_name"] == "教师考勤管理办法.pdf"
 
 
 def test_image_generation_skill_contract_and_lineage_lock() -> None:

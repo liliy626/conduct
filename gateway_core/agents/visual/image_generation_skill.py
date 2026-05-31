@@ -5,15 +5,15 @@ import hashlib
 from collections.abc import AsyncIterator
 from typing import Any
 
-from gateway_core.agents.base_skill import BaseAgentSkill, RuntimeContext
-from gateway_core.agents.universal_hub.models import SkillEvent
+from gateway_core.agents.base_skill import BaseMultimodalAgentSkill, RuntimeContext
+from gateway_core.agents.universal_hub.models import MultimodalOutputContract, SkillEvent
 from gateway_core.agents.universal_hub.state import ImageArtifact, UniversalAgentState
 from gateway_core.agents.visual.prompt_synthesizer import TripleAxisPromptSynthesizer
 from gateway_core.tools.image_tool import ImageTool
 from gateway_core.tools.tool_core import AgentToolInput, ToolExecutionContext
 
 
-class ImageGenerationSkill(BaseAgentSkill):
+class ImageGenerationSkill(BaseMultimodalAgentSkill):
     """Generate a visual artifact from an existing SQL lineage record.
 
     The skill deliberately does not query databases and does not append image
@@ -81,20 +81,18 @@ class ImageGenerationSkill(BaseAgentSkill):
             status="completed",
         )
 
-        yield SkillEvent(
-            event_type="evidence_completed",
-            data={
-                "type": "image_artifact",
-                "payload": {
-                    "artifact_id": artifact.artifact_id,
+        yield self._event_from_multimodal_contract(
+            MultimodalOutputContract(
+                artifact_type="image_artifact",
+                artifact_id=artifact.artifact_id,
+                cdn_url=artifact.cdn_url,
+                crypto_proof=image_md5_proof,
+                meta_payload={
                     "markdown_render": f"\n\n![智能校园大屏分析插图]({artifact.cdn_url})\n\n",
                     "linked_sql_hash": artifact.linked_sql_hash,
-                    "image_md5_proof": image_md5_proof,
                     "prompt_used": artifact.prompt_used,
-                    "cdn_url": artifact.cdn_url,
-                    "status": artifact.status,
                 },
-            },
+            )
         )
 
 

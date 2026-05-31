@@ -35,3 +35,14 @@ class SkillSpec:
     tools: frozenset[str]
     supports_stream: bool
     default_model_role: str
+
+
+@dataclass(frozen=True)
+class MultimodalOutputContract:
+    """Typed handoff contract for multimodal artifact-producing skills."""
+
+    artifact_type: str
+    artifact_id: str
+    cdn_url: str
+    crypto_proof: str
+    meta_payload: dict[str, Any]
