@@ -13,6 +13,7 @@ chains are intentionally not part of this orchestrator anymore.
 """
 
 import asyncio
+import copy
 import hashlib
 from io import StringIO
 import json
@@ -81,6 +82,18 @@ CANONICAL_PLAN_CACHE: dict[str, dict[str, Any]] = {
         "title": "教师请假排行黄金执行计划",
     }
 }
+
+_PLAN_CACHE_HANDOFF_TRANSIENT_META_KEYS = frozenset(
+    {
+        "logs",
+        "process_events",
+        "reasoning_buffer",
+        "stream_events",
+        "thinking_buffer",
+        "thinking_logs",
+        "transactional_events",
+    }
+)
 
 
 def _resolve_effective_stream_mode(
@@ -574,6 +587,17 @@ def _canonical_plan_lineage_ledger_for_tenant(
     return lineages
 
 
+def _canonical_plan_handoff_meta_context(
+    meta_context: dict[str, Any] | None,
+    lineage_ledger: list[dict[str, Any]],
+) -> dict[str, Any]:
+    clean = copy.deepcopy(dict(meta_context or {}))
+    for key in _PLAN_CACHE_HANDOFF_TRANSIENT_META_KEYS:
+        clean.pop(key, None)
+    clean["executed_sql_lineage"] = copy.deepcopy(lineage_ledger)
+    return clean
+
+
 async def _stream_canonical_plan_cache(
     *,
     plan: dict[str, Any],
@@ -738,10 +762,7 @@ async def _stream_canonical_plan_cache_then_hub(
             "messages": [*list(state.get("messages") or []), AIMessage(content=text)] if text else list(state.get("messages") or []),
             "completed_outputs": list(plan.get("required_outputs") or []),
             "visited_skills": list(result.get("visited_skills") or ["canonical_plan_cache"]),
-            "meta_context": {
-                **dict(state.get("meta_context") or {}),
-                "executed_sql_lineage": lineage_ledger,
-            },
+            "meta_context": _canonical_plan_handoff_meta_context(state.get("meta_context"), lineage_ledger),
         }
         async for chunk in _stream_experimental_shadow_hub(
             graph=graph,
@@ -1021,6 +1042,10 @@ async def _stream_experimental_shadow_hub(
             stream_done=True,
         )
         yield runtime_response_fns.stream_end(setup.spec.model_id, setup.completion_id)
+    finally:
+        content_buffer.truncate(0)
+        content_buffer.seek(0)
+        transactional_events.clear()
 
 
 async def _single_skill_event(event: SkillEvent):

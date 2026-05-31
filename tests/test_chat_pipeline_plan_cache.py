@@ -156,3 +156,33 @@ def test_canonical_plan_lineage_accepts_matching_tenant_handoff() -> None:
         result,
         {"school_id": "sch_a"},
     ) == [lineage]
+
+
+def test_canonical_plan_handoff_meta_context_drops_transient_stream_state() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    lineage = {"sql_hash": "a" * 64, "meta_context": {"tenant_id": "sch_a"}}
+    source_meta = {
+        "thinking_buffer": ["old process text"],
+        "logs": ["old trace"],
+        "stable": {"items": []},
+    }
+
+    cleaned = chat_pipeline._canonical_plan_handoff_meta_context(source_meta, [lineage])
+    source_meta["stable"]["items"].append("mutated")
+
+    assert "thinking_buffer" not in cleaned
+    assert "logs" not in cleaned
+    assert cleaned["stable"] == {"items": []}
+    assert cleaned["executed_sql_lineage"] == [lineage]
+
+
+def test_shadow_hub_stream_clears_transactional_buffers() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    source = inspect.getsource(chat_pipeline._stream_experimental_shadow_hub)
+
+    assert "finally:" in source
+    assert "content_buffer.truncate(0)" in source
+    assert "content_buffer.seek(0)" in source
+    assert "transactional_events.clear()" in source

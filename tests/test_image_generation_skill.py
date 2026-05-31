@@ -9,6 +9,7 @@ import textwrap
 import time
 from typing import AsyncIterator
 
+import pytest
 from langchain_core.messages import HumanMessage
 
 
@@ -184,6 +185,13 @@ def test_image_generation_skill_rejects_untrusted_artifact_url() -> None:
             "message": events[-1].data["text"].strip().removeprefix("生图失败："),
         }
     ]
+
+
+def test_artifact_url_validation_raises_explicit_error() -> None:
+    from gateway_core.tools.artifact_store import ArtifactValidationError, validate_external_artifact_url
+
+    with pytest.raises(ArtifactValidationError):
+        validate_external_artifact_url("https://evil.example.test/img.png")
 
 
 def test_image_generation_skill_prefers_non_empty_sql_lineage() -> None:

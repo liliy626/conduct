@@ -17,6 +17,10 @@ _DEFAULT_ALLOWED_ARTIFACT_HOSTS = (
 )
 
 
+class ArtifactValidationError(ValueError):
+    """Raised when an external artifact URL violates the gateway allowlist."""
+
+
 def artifact_root() -> Path:
     root = os.getenv("GATEWAY_ARTIFACT_DIR", "artifacts/gateway").strip() or "artifacts/gateway"
     path = Path(root)
@@ -51,10 +55,10 @@ def validate_external_artifact_url(url: str) -> str:
     if clean.startswith("/v1/artifacts/"):
         return clean
     if parsed.scheme != "https" or not parsed.hostname:
-        raise ValueError("artifact URL must be an HTTPS URL or local artifact path")
+        raise ArtifactValidationError("artifact URL must be an HTTPS URL or local artifact path")
     host = parsed.hostname.lower()
     if not any(host == allowed or host.endswith(f".{allowed}") for allowed in _allowed_artifact_hosts()):
-        raise ValueError(f"artifact URL host `{host}` 不在允许域名白名单")
+        raise ArtifactValidationError(f"artifact URL host `{host}` 不在允许域名白名单")
     return clean
 
 
