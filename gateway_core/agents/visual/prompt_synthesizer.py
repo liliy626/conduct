@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
 
 from langchain_core.messages import BaseMessage
 
 from gateway_core.prompts.prompt_domains import (
+    ENTITY_ROUTER_MATRIX,
     IMAGE_ENTITY_CONTEXTS,
     IMAGE_MASTER_TEMPLATE,
     IMAGE_STYLE_THEMES,
+    STYLE_ROUTER_MATRIX,
 )
 
 
@@ -49,24 +50,26 @@ def _recent_text(history_messages: Sequence[BaseMessage]) -> str:
 
 
 def _style_axis(text: str) -> str:
-    if any(token in text for token in ("警示", "严重", "最差", "问题", "风险", "橙色", "预警")):
-        return IMAGE_STYLE_THEMES["warning"]
-    if any(token in text for token in ("对比", "趋势", "变化", "环比", "同比")):
-        return IMAGE_STYLE_THEMES["analytical"]
-    if any(token in text for token in ("汇报", "领导", "校长", "大屏", "驾驶舱")):
-        return IMAGE_STYLE_THEMES["executive"]
-    return IMAGE_STYLE_THEMES["default"]
+    key = _route_key(text, STYLE_ROUTER_MATRIX, default_key="default")
+    return IMAGE_STYLE_THEMES[key]
 
 
 def _entity_axis(*, text: str, purpose: str) -> str:
     combined = f"{text} {purpose}".lower()
-    if any(token in combined for token in ("眼保健操", "违纪", "扣分", "行规", "纪律", "德育")):
-        return IMAGE_ENTITY_CONTEXTS["student_discipline"]
-    if any(token in combined for token in ("老师", "教师", "教研组", "请假", "销假", "假勤")):
-        return IMAGE_ENTITY_CONTEXTS["faculty"]
-    if any(token in combined for token in ("年级", "班级", "学生")):
-        return IMAGE_ENTITY_CONTEXTS["student_grade"]
-    return IMAGE_ENTITY_CONTEXTS["default"].format(purpose=purpose)
+    key = _route_key(combined, ENTITY_ROUTER_MATRIX, default_key="default")
+    return IMAGE_ENTITY_CONTEXTS[key].format(purpose=purpose)
+
+
+def _route_key(text: str, matrix: dict[str, Sequence[str]], *, default_key: str) -> str:
+    matches = [
+        (len(str(word)), key)
+        for key, words in matrix.items()
+        for word in words
+        if str(word) and str(word) in text
+    ]
+    if not matches:
+        return default_key
+    return max(matches, key=lambda item: item[0])[1]
 
 
 def _data_axis(*, tables: list[str], row_count: int) -> str:

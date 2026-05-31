@@ -313,6 +313,26 @@ def test_prompt_synthesizer_uses_centralized_master_template(monkeypatch) -> Non
     assert prompt.startswith("STYLE=")
 
 
+def test_prompt_synthesizer_routes_by_configured_matrices(monkeypatch) -> None:
+    import gateway_core.agents.visual.prompt_synthesizer as prompt_synthesizer
+
+    monkeypatch.setitem(prompt_synthesizer.IMAGE_STYLE_THEMES, "calm", "Calm green restorative campus style")
+    monkeypatch.setitem(prompt_synthesizer.IMAGE_ENTITY_CONTEXTS, "student_rest", "student lunch break routine dashboard")
+    monkeypatch.setitem(prompt_synthesizer.STYLE_ROUTER_MATRIX, "calm", ("舒缓",))
+    monkeypatch.setitem(prompt_synthesizer.ENTITY_ROUTER_MATRIX, "student_rest", ("午休纪律",))
+
+    prompt = prompt_synthesizer.TripleAxisPromptSynthesizer.synthesize(
+        history_messages=[HumanMessage(content="午休纪律做一张舒缓风格的图")],
+        purpose="午休纪律分析",
+        tables=["zx_mlh.行规检查_行规检查"],
+        row_count=7,
+    )
+
+    assert "Calm green restorative campus style" in prompt
+    assert "student lunch break routine dashboard" in prompt
+    assert "7 real-time data records" in prompt
+
+
 def test_image_generation_skill_passes_triple_axis_prompt_to_openai(tmp_path, monkeypatch) -> None:
     from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
 

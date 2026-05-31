@@ -9,11 +9,23 @@ IMAGE_STYLE_THEMES = {
     "executive": "Executive school operations dashboard illustration, polished light BI style",
 }
 
+STYLE_ROUTER_MATRIX = {
+    "warning": ("警示", "严重", "最差", "问题", "风险", "橙色", "预警"),
+    "analytical": ("对比", "趋势", "变化", "环比", "同比"),
+    "executive": ("汇报", "领导", "校长", "大屏", "驾驶舱"),
+}
+
 IMAGE_ENTITY_CONTEXTS = {
     "default": "campus analytics dashboard about {purpose}",
     "faculty": "faculty attendance and leave analytics dashboard",
     "student_discipline": "student behavior discipline and routine inspection dashboard",
     "student_grade": "student grade and class operations dashboard",
+}
+
+ENTITY_ROUTER_MATRIX = {
+    "student_discipline": ("眼保健操", "违纪", "扣分", "行规", "纪律", "德育"),
+    "faculty": ("老师", "教师", "教研组", "请假", "销假", "假勤"),
+    "student_grade": ("年级", "班级", "学生"),
 }
 
 IMAGE_MASTER_TEMPLATE = (
