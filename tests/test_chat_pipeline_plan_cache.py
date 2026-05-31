@@ -231,3 +231,12 @@ def test_shadow_hub_stream_sends_initial_reasoning_heartbeat() -> None:
 
     assert "正在解析问题并准备查库" in source
     assert "event_type=\"process\"" in source
+
+
+def test_streaming_sse_response_disables_proxy_buffering() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    response = chat_pipeline._streaming_sse_response(iter(()))
+
+    assert response.headers["x-accel-buffering"] == "no"
+    assert "no-transform" in response.headers["cache-control"]

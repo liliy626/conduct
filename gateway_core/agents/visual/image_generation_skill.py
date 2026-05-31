@@ -155,13 +155,16 @@ def _lineage_tables(lineage: dict[str, Any]) -> list[str]:
 
 
 def _lineage_data_rows(lineage: dict[str, Any]) -> list[dict[str, Any]]:
-    for key in ("row_sample", "data_rows", "display_rows", "preview_rows"):
+    for key in ("row_sample", "top_items", "data_rows", "display_rows", "preview_rows"):
         rows = lineage.get(key)
         if isinstance(rows, list):
             return [dict(item) for item in rows[:5] if isinstance(item, dict)]
     summary = lineage.get("evidence_summary")
-    if isinstance(summary, dict) and isinstance(summary.get("row_sample"), list):
-        return [dict(item) for item in summary["row_sample"][:5] if isinstance(item, dict)]
+    if isinstance(summary, dict):
+        for key in ("row_sample", "top_items"):
+            rows = summary.get(key)
+            if isinstance(rows, list):
+                return [dict(item) for item in rows[:5] if isinstance(item, dict)]
     return []
 
 

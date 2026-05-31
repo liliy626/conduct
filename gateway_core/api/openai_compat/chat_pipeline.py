@@ -83,6 +83,20 @@ CANONICAL_PLAN_CACHE: dict[str, dict[str, Any]] = {
     }
 }
 
+_SSE_PROXY_BYPASS_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+}
+
+
+def _streaming_sse_response(stream: Any) -> StreamingResponse:
+    return StreamingResponse(
+        stream,
+        media_type="text/event-stream",
+        headers=_SSE_PROXY_BYPASS_HEADERS,
+    )
+
+
 _PLAN_CACHE_HANDOFF_TRANSIENT_META_KEYS = frozenset(
     {
         "logs",
@@ -247,7 +261,7 @@ async def run_chat_completions(
             context_present=True,
             cache_hit=False,
         )
-        return StreamingResponse(
+        return _streaming_sse_response(
             run_policy_only_agent_native_stream(
                 spec=setup.spec,
                 pipeline_ctx=setup.pipeline_ctx,
@@ -263,8 +277,7 @@ async def run_chat_completions(
                 conversation_context=conversation_context,
                 conversation_memory_key=conversation_memory_key_value,
                 monitor_answer_preview_fn=_monitor_answer_preview,
-            ),
-            media_type="text/event-stream",
+            )
         )
 
     if _should_use_school_agent(setup.token, setup.effective_question):
@@ -278,7 +291,7 @@ async def run_chat_completions(
             context_present=True,
             cache_hit=False,
         )
-        return StreamingResponse(
+        return _streaming_sse_response(
             run_agent_native_stream(
                 spec=setup.spec,
                 pipeline_ctx=setup.pipeline_ctx,
@@ -295,8 +308,7 @@ async def run_chat_completions(
                 conversation_context=conversation_context,
                 conversation_memory_key=conversation_memory_key_value,
                 monitor_answer_preview_fn=_monitor_answer_preview,
-            ),
-            media_type="text/event-stream",
+            )
         )
 
     return await _run_plain_chat(
@@ -412,7 +424,7 @@ async def _run_experimental_shadow_hub(
         remaining_outputs = _canonical_plan_remaining_outputs(plan, setup.effective_question)
         if remaining_outputs:
             if setup.pipeline_ctx.stream:
-                return StreamingResponse(
+                return _streaming_sse_response(
                     _stream_canonical_plan_cache_then_hub(
                         plan=plan,
                         graph=compile_universal_hub_graph(),
@@ -426,11 +438,10 @@ async def _run_experimental_shadow_hub(
                         runtime_response_fns=runtime_response_fns,
                         monitor_base={**monitor_base, "cache_hit": True},
                         route_name=route_name,
-                    ),
-                    media_type="text/event-stream",
+                    )
                 )
         if setup.pipeline_ctx.stream:
-            return StreamingResponse(
+            return _streaming_sse_response(
                 _stream_canonical_plan_cache(
                     plan=plan,
                     user_query=setup.effective_question,
@@ -441,8 +452,7 @@ async def _run_experimental_shadow_hub(
                     runtime_response_fns=runtime_response_fns,
                     monitor_base={**monitor_base, "cache_hit": True},
                     route_name=route_name,
-                ),
-                media_type="text/event-stream",
+                )
             )
         try:
             result = await _execute_canonical_plan_cache(
@@ -498,7 +508,7 @@ async def _run_experimental_shadow_hub(
     graph = compile_universal_hub_graph()
 
     if setup.pipeline_ctx.stream:
-        return StreamingResponse(
+        return _streaming_sse_response(
             _stream_experimental_shadow_hub(
                 graph=graph,
                 state=state,
@@ -508,8 +518,7 @@ async def _run_experimental_shadow_hub(
                 runtime_response_fns=runtime_response_fns,
                 monitor_base=monitor_base,
                 route_name=route_name,
-            ),
-            media_type="text/event-stream",
+            )
         )
 
     try:
@@ -1759,15 +1768,14 @@ async def _run_plain_chat(*, setup: Any, response_tools: Any, runtime_response_f
         cache_hit=False,
     )
     if setup.pipeline_ctx.stream:
-        return StreamingResponse(
+        return _streaming_sse_response(
             _stream_plain_chat(
                 setup=setup,
                 lc_messages=lc_messages,
                 monitor_base=monitor_base,
                 response_tools=response_tools,
                 runtime_response_fns=runtime_response_fns,
-            ),
-            media_type="text/event-stream",
+            )
         )
 
     model_started = time.perf_counter()

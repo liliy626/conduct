@@ -284,6 +284,50 @@ def test_image_generation_skill_prompt_includes_real_row_sample_values() -> None
     assert "禁止写“未提供数据”" in payload["prompt_used"]
 
 
+def test_image_generation_skill_prompt_uses_aggregate_top_items() -> None:
+    from gateway_core.agents.visual.image_generation_skill import ImageGenerationSkill
+
+    state = {
+        "messages": [HumanMessage(content="本学期全校教师请假概况如何？生成一张纯中文管理图")],
+        "session_context": {"school_id": "sch_zx_mlh", "schema_name": "zx_mlh"},
+        "required_outputs": ["image_artifact"],
+        "completed_outputs": ["data_evidence"],
+        "artifact_refs": [],
+        "multimodal_artifacts": {},
+        "meta_context": {
+            "executed_sql_lineage": [
+                {
+                    "sql_hash": SQL_HASH,
+                    "tables_used": ["zx_mlh.教师销假_请假明细"],
+                    "row_count": 20,
+                    "query_purpose": "教师请假概况",
+                    "evidence_summary": {
+                        "top_items": [
+                            {"教师姓名": "张老师", "请假次数": 8, "总请假时长_小时": 32.5},
+                            {"教师姓名": "李老师", "请假次数": 6, "总请假时长_小时": 20.0},
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+
+    async def collect() -> list:
+        return [
+            event
+            async for event in ImageGenerationSkill().astream(
+                state,
+                ctx={"image_latency_sec": 0, "image_mock_mode": True},
+            )
+        ]
+
+    payload = asyncio.run(collect())[-1].data["payload"]
+
+    assert "张老师" in payload["prompt_used"]
+    assert "请假次数：8" in payload["prompt_used"]
+    assert "总请假时长_小时：32.5" in payload["prompt_used"]
+
+
 def test_sql_lineage_preserves_limited_row_sample_for_visual_workers() -> None:
     from gateway_core.agents.school_sql.sql_tools import _sql_evidence_lineage
 
@@ -1178,3 +1222,10 @@ def test_ppt_generation_skill_has_no_naked_evidence_completed_dict() -> None:
 
     assert 'event_type="evidence_completed"' not in source
     assert "MultimodalOutputContract" in source
+
+
+def test_image_tool_style_prompt_forbids_missing_data_placeholders() -> None:
+    from gateway_core.tools.image_tool import BI_IMAGE_STYLE_PROMPT
+
+    assert "严禁在图中写“未提供数据”" in BI_IMAGE_STYLE_PROMPT
+    assert "可以改成“未提供数据”" not in BI_IMAGE_STYLE_PROMPT

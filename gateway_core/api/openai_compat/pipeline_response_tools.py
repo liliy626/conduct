@@ -10,6 +10,12 @@ from gateway_core.api.openai_compat.chat_pipeline_parts import request_parts
 from gateway_core.api.openai_compat.early_response import build_single_text_response
 
 
+_SSE_PROXY_BYPASS_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+}
+
+
 @dataclass(frozen=True)
 class PipelineResponseTools:
     elapsed_ms: Callable[[], float]
@@ -67,7 +73,11 @@ def build_pipeline_response_tools(
                 log_monitor_event(final_payload, first_token_ms=first_token_ms, stream_done=True)
             yield runtime_stream_end_fn(model_id, completion_id)
 
-        return StreamingResponse(_stream(), media_type="text/event-stream")
+        return StreamingResponse(
+            _stream(),
+            media_type="text/event-stream",
+            headers=_SSE_PROXY_BYPASS_HEADERS,
+        )
 
     def text_response(
         *,
