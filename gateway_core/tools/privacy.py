@@ -31,7 +31,7 @@ SENSITIVE_KEYWORDS = {
     "老师",
 }
 
-NAME_LIST_PATTERN = re.compile(r"([\u4e00-\u9fff]{2,4}[、,，\s]+){1,}[\u4e00-\u9fff]{2,4}")
+NAME_LIST_PATTERN = re.compile(r"([\u4e00-\u9fff]{2,4}[、,， ]+){2,}[\u4e00-\u9fff]{2,4}")
 TEACHER_NAME_PATTERN = re.compile(r"[\u4e00-\u9fff]{2,4}老师")
 STUDENT_NAME_PATTERN = re.compile(r"[\u4e00-\u9fff]{2,4}(同学|学生)")
 

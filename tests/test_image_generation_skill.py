@@ -237,8 +237,8 @@ def test_image_generation_skill_prefers_non_empty_sql_lineage() -> None:
     payload = events[-1].data["payload"]
 
     assert payload["linked_sql_hash"] == non_empty_hash
-    assert "73 real-time data records" in payload["prompt_used"]
-    assert "zx_mlh.教师销假_请假明细" in payload["prompt_used"]
+    assert "真实记录数：73" in payload["prompt_used"]
+    assert "已审计校园数据表" in payload["prompt_used"]
 
 
 def test_image_generation_skill_has_no_legacy_prompt_or_blind_tail_lineage() -> None:
@@ -527,7 +527,7 @@ def test_image_generation_skill_uses_openai_provider_and_artifact_store(tmp_path
 
     monkeypatch.setenv("GATEWAY_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setenv("GATEWAY_IMAGE_PROVIDER", "openai")
-    monkeypatch.setenv("GATEWAY_IMAGE_OPENAI_MODEL", "gpt-image-1.5")
+    monkeypatch.setenv("GATEWAY_IMAGE_OPENAI_MODEL", "gpt-image-2")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     calls = []
@@ -573,9 +573,9 @@ def test_image_generation_skill_uses_openai_provider_and_artifact_store(tmp_path
 
     events = asyncio.run(collect())
     assert calls, "OpenAI image provider should be called through the existing ImageTool path"
-    assert calls[0]["model"] == "gpt-image-1.5"
+    assert calls[0]["model"] == "gpt-image-2"
     assert calls[0]["size"] == "1024x1024"
-    assert "SQL Hash: a1d11461f1ed" in calls[0]["prompt"]
+    assert "数据指纹：已绑定" in calls[0]["prompt"]
 
     payload = events[-1].data["payload"]
     assert payload["linked_sql_hash"] == SQL_HASH
@@ -590,7 +590,7 @@ def test_image_generation_skill_keeps_event_loop_free_during_openai_write(tmp_pa
 
     monkeypatch.setenv("GATEWAY_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setenv("GATEWAY_IMAGE_PROVIDER", "openai")
-    monkeypatch.setenv("GATEWAY_IMAGE_OPENAI_MODEL", "gpt-image-1.5")
+    monkeypatch.setenv("GATEWAY_IMAGE_OPENAI_MODEL", "gpt-image-2")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     class _OpenAIImageItem:
@@ -712,9 +712,41 @@ def test_triple_axis_prompt_synthesizer_aligns_style_entity_and_data() -> None:
     )
 
     assert IMAGE_STYLE_THEMES["warning"] in prompt
-    assert "student behavior discipline" in prompt
-    assert "11 real-time data records" in prompt
-    assert "zx_mlh.行规检查_行规检查" in prompt
+    assert "学生行为规范与日常检查看板" in prompt
+    assert "真实记录数：11" in prompt
+    assert "已审计校园数据表" in prompt
+
+
+def test_triple_axis_prompt_synthesizer_uses_simplified_chinese_goal_and_style_contract() -> None:
+    from gateway_core.agents.visual.prompt_synthesizer import TripleAxisPromptSynthesizer
+
+    prompt = TripleAxisPromptSynthesizer.synthesize(
+        history_messages=[HumanMessage(content="请把男女请假比例排行做成一张苹果飞书风格的大屏图")],
+        purpose="男女请假比例排行",
+        tables=["zx_mlh.教师销假_请假明细"],
+        row_count=20,
+    )
+
+    assert "绘图员工明确指令" in prompt
+    assert "用户分析目标：比例与分布分析" in prompt
+    assert "真实数据来源：已审计校园数据表" in prompt
+    assert "苹果极简设计语言" in prompt
+    assert "飞书企业应用布局" in prompt
+    assert "只能使用清晰、现代、规整的简体中文字体" in prompt
+    assert "男女请假比例排行" in prompt
+    assert not __import__("re").search(r"[A-Za-z]", prompt)
+
+
+def test_visual_prompt_sanitizer_keeps_structured_chinese_prompt_sections() -> None:
+    from gateway_core.tools.privacy import sanitize_visual_prompt
+
+    prompt = "用户原始诉求：眼保健操违纪扣分分析\n真实数据来源：已审计校园数据表，真实记录数：11"
+
+    sanitized = sanitize_visual_prompt(prompt)
+
+    assert "多人名单" not in sanitized
+    assert "眼保健操违纪扣分分析" in sanitized
+    assert "真实数据来源" in sanitized
 
 
 def test_prompt_synthesizer_uses_centralized_master_template(monkeypatch) -> None:
@@ -740,8 +772,8 @@ def test_prompt_synthesizer_uses_centralized_master_template(monkeypatch) -> Non
 def test_prompt_synthesizer_routes_by_configured_matrices(monkeypatch) -> None:
     import gateway_core.agents.visual.prompt_synthesizer as prompt_synthesizer
 
-    monkeypatch.setitem(prompt_synthesizer.IMAGE_STYLE_THEMES, "calm", "Calm green restorative campus style")
-    monkeypatch.setitem(prompt_synthesizer.IMAGE_ENTITY_CONTEXTS, "student_rest", "student lunch break routine dashboard")
+    monkeypatch.setitem(prompt_synthesizer.IMAGE_STYLE_THEMES, "calm", "舒缓绿色校园修复风格")
+    monkeypatch.setitem(prompt_synthesizer.IMAGE_ENTITY_CONTEXTS, "student_rest", "学生午休纪律看板")
     monkeypatch.setitem(prompt_synthesizer.STYLE_ROUTER_MATRIX, "calm", ("舒缓",))
     monkeypatch.setitem(prompt_synthesizer.ENTITY_ROUTER_MATRIX, "student_rest", ("午休纪律",))
 
@@ -752,9 +784,9 @@ def test_prompt_synthesizer_routes_by_configured_matrices(monkeypatch) -> None:
         row_count=7,
     )
 
-    assert "Calm green restorative campus style" in prompt
-    assert "student lunch break routine dashboard" in prompt
-    assert "7 real-time data records" in prompt
+    assert "舒缓绿色校园修复风格" in prompt
+    assert "学生午休纪律看板" in prompt
+    assert "真实记录数：7" in prompt
 
 
 def test_prompt_synthesizer_router_functions_have_no_explicit_if_branches() -> None:
@@ -783,7 +815,7 @@ def test_image_generation_skill_passes_triple_axis_prompt_to_openai(tmp_path, mo
 
     monkeypatch.setenv("GATEWAY_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setenv("GATEWAY_IMAGE_PROVIDER", "openai")
-    monkeypatch.setenv("GATEWAY_IMAGE_OPENAI_MODEL", "gpt-image-1.5")
+    monkeypatch.setenv("GATEWAY_IMAGE_OPENAI_MODEL", "gpt-image-2")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     calls = []
 
@@ -831,11 +863,12 @@ def test_image_generation_skill_passes_triple_axis_prompt_to_openai(tmp_path, mo
 
     events = asyncio.run(collect())
     assert events[-1].event_type == "evidence_completed"
-    prompt = calls[0]["prompt"]
-    assert "amber and deep orange alert style" in prompt
-    assert "student behavior discipline" in prompt
-    assert "11 real-time data records" in prompt
-    assert "SQL Hash: a1d11461f1ed" in prompt
+    prompt = events[-1].data["payload"]["prompt_used"]
+    assert "警示型行政数据图" in prompt
+    assert "学生行为规范与日常检查看板" in prompt
+    assert "真实记录数：11" in prompt
+    assert "数据指纹：已绑定" in calls[0]["prompt"]
+    assert not __import__("re").search(r"[A-Za-z]", calls[0]["prompt"])
 
 
 def test_generate_image_releases_tool_output_after_url(monkeypatch) -> None:

@@ -60,7 +60,7 @@ class ImageGenerationSkill(BaseMultimodalAgentSkill):
             tables=tables,
             row_count=row_count,
         )
-        prompt = f"{prompt} SQL Hash: {sql_hash[:12]}."
+        prompt = f"{prompt}\n数据指纹：已绑定。"
         yield SkillEvent(event_type="process", data={"text": "正在生成校园大屏可视化插图...\n"})
         await asyncio.sleep(float(ctx.get("image_latency_sec", 0.05) or 0))
 

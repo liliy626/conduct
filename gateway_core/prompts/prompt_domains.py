@@ -5,10 +5,10 @@ from collections.abc import Sequence
 from typing import Dict
 
 IMAGE_STYLE_THEMES = {
-    "default": "Professional school management dashboard illustration, clean light operations style",
-    "warning": "Warning tone administrative infographic, amber and deep orange alert style, clean corporate vectors",
-    "analytical": "Analytical data trend presentation graphic, dark blue tech infographic style, sharp flat design",
-    "executive": "Executive school operations dashboard illustration, polished light BI style",
+    "default": "专业校园管理大屏插图，明亮、干净、克制的运营看板风格",
+    "warning": "警示型行政数据图，琥珀橙与深橙色风险提示风格，干净的企业级矢量质感",
+    "analytical": "分析型数据趋势展示图，清爽蓝白科技信息图风格，平面化、利落、易读",
+    "executive": "校长汇报级校园运行驾驶舱插图，精致、明亮、克制的飞书风看板风格",
 }
 
 STYLE_ROUTER_MATRIX = {
@@ -18,10 +18,10 @@ STYLE_ROUTER_MATRIX = {
 }
 
 IMAGE_ENTITY_CONTEXTS = {
-    "default": "campus analytics dashboard about {purpose}",
-    "faculty": "faculty attendance and leave analytics dashboard",
-    "student_discipline": "student behavior discipline and routine inspection dashboard",
-    "student_grade": "student grade and class operations dashboard",
+    "default": "围绕“{purpose}”的校园数据分析看板",
+    "faculty": "教师假勤与考勤分析看板",
+    "student_discipline": "学生行为规范与日常检查看板",
+    "student_grade": "年级与班级运行分析看板",
 }
 
 ENTITY_ROUTER_MATRIX = {
@@ -30,10 +30,31 @@ ENTITY_ROUTER_MATRIX = {
     "student_grade": ("年级", "班级", "学生"),
 }
 
+ANALYTIC_GOAL_LABELS = {
+    "default": "校园数据分析",
+    "comparison": "排行对比分析",
+    "distribution": "比例与分布分析",
+    "trend": "趋势变化分析",
+}
+
+ANALYTIC_GOAL_ROUTER_MATRIX = {
+    "distribution": ("比例", "占比", "分布", "男女", "结构"),
+    "trend": ("趋势", "变化", "环比", "同比", "走势"),
+    "comparison": ("排行", "排名", "最多", "最少", "对比", "比较"),
+}
+
 IMAGE_MASTER_TEMPLATE = (
-    "{style_theme}, {entity_context}, {data_signal}, "
-    "clean executive campus dashboard composition, crisp vector-like UI, "
-    "no invented numbers, no fake people portraits, no dark sci-fi style."
+    "【绘图员工明确指令】\n"
+    "用户原始诉求：{user_goal_text}\n"
+    "用户分析目标：{analytic_goal}\n"
+    "真实数据来源：{data_signal}\n\n"
+    "【画面主题】\n"
+    "{style_theme}，{entity_context}。\n\n"
+    "【视觉与设计规范】\n"
+    "严格采用苹果极简设计语言与飞书企业应用布局。浅色模式，高留白，网格对齐，外边距至少保留百分之十，避免任何裁切。\n"
+    "图形使用干净的水平条形图、比例环图、趋势折线或简洁指标卡，按用户分析目标选择最合适的版式。\n"
+    "配色使用飞书青、纯白、苹果石板灰、柔和商务蓝与少量琥珀警示色；禁止厚重三维写实、暗黑赛博霓虹、杂乱噪声。\n"
+    "字体要求：只能使用清晰、现代、规整的简体中文字体，所有标题、数字、图例和标签必须简洁可读。"
 )
 
 VISUAL_INTENT_KEYWORDS = (
@@ -107,11 +128,13 @@ def render_triple_axis_prompt(
     full_text = _flatten_recent_message_text(history_messages)
     style_key = _route_matrix_key(full_text, style_router_matrix)
     entity_key = _route_matrix_key(f"{full_text} {purpose}".lower(), entity_router_matrix)
-    table_text = (", ".join(tables[:3]), "audited school data")[not bool(tables)]
+    analytic_goal_key = _route_matrix_key(f"{full_text} {purpose}".lower(), ANALYTIC_GOAL_ROUTER_MATRIX)
     return master_template.format(
+        user_goal_text=str(purpose or ANALYTIC_GOAL_LABELS["default"]).strip() or ANALYTIC_GOAL_LABELS["default"],
+        analytic_goal=ANALYTIC_GOAL_LABELS[analytic_goal_key],
         style_theme=style_themes[style_key],
         entity_context=entity_contexts[entity_key].format(purpose=purpose),
-        data_signal=f"accurately visualizing {row_count} real-time data records registered in table '{table_text}'",
+        data_signal=f"已审计校园数据表，真实记录数：{int(row_count or 0)}",
     )
 
 
