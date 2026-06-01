@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from decimal import Decimal
 from typing import Any
+
+from gateway_core.agents.school_sql.lineage_route import decide_lineage_route
 
 
 BAR_LINE_ROLE_PRESETS = {
@@ -65,112 +68,6 @@ BAR_LINE_ROLE_PRESETS = {
 
 DOMAIN_ROLE_PRESETS = BAR_LINE_ROLE_PRESETS
 
-DOMAIN_ROUTER_MATRIX = {
-    "党政核心层": (
-        "党支部",
-        "校长室",
-        "校办",
-        "党政",
-        "公章",
-        "会务",
-        "发展规划",
-        "校园安全总责",
-        "行政大盘",
-    ),
-    "教学线": (
-        "教务处",
-        "教务",
-        "课程教学",
-        "研究生院",
-        "课表",
-        "排课",
-        "代课",
-        "备勤",
-        "教材",
-        "学籍",
-        "教学常规",
-        "教研组运行",
-        "教学",
-    ),
-    "学生与德育线": (
-        "德育处",
-        "学工部",
-        "研工部",
-        "少先队",
-        "班主任",
-        "学生行为规范",
-        "行规红黑榜",
-        "眼保健操",
-        "行规",
-        "德育",
-        "扣分",
-        "违纪",
-        "纪律",
-        "家校",
-        "法治",
-    ),
-    "人事线": (
-        "人事处",
-        "教师工作部",
-        "教师请假",
-        "教研组请假",
-        "师资结构",
-        "请假频率",
-        "教师工作量",
-        "教师培训学分",
-        "职称评审",
-        "跨年级代课",
-        "假勤",
-        "考勤",
-        "销假",
-        "teacher_leave",
-        "leave",
-    ),
-    "后勤保障线": (
-        "总务处",
-        "后勤保障",
-        "国资处",
-        "资产采购",
-        "食堂",
-        "餐饮",
-        "基建",
-        "维修",
-        "门禁",
-        "消防",
-        "报修",
-        "物业",
-        "预算",
-    ),
-    "科研线": (
-        "教科室",
-        "教师发展部",
-        "科研处",
-        "课题申报",
-        "论文发表",
-        "科研经费",
-        "学术成果",
-        "职称评定",
-        "科研",
-        "课题",
-        "论文",
-        "成果",
-    ),
-    "群团与监督": (
-        "工会",
-        "纪委",
-        "监察处",
-        "学术委员会",
-        "教代会",
-        "职工福利",
-        "退管",
-        "女工",
-        "纪检",
-        "统战",
-        "合规",
-        "监督",
-    ),
-}
-
 
 def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
     value = os.getenv(primary, "").strip()
@@ -202,6 +99,7 @@ def summarize_query_result(
     all_raw_rows = [_json_safe_row(row) for row in formatted_rows if isinstance(row, dict)]
     total_len = len(all_raw_rows)
     result_id = f"res_idx_{uuid.uuid4().hex[:16]}"
+    _cache_lossless_rows_to_vault(result_id, all_raw_rows)
     numeric_columns = _numeric_columns(all_raw_rows)
     dimension_columns = _dimension_columns(all_raw_rows, numeric_columns)
     metric_col = _preferred_metric(numeric_columns) if numeric_columns else None
@@ -267,6 +165,14 @@ def display_rows_for_shape(
         "display_row_count": min(len(rows), limit),
         "display_rows_has_more": len(rows) > limit,
     }
+
+
+def load_lossless_result_rows(result_id: str) -> list[dict[str, Any]]:
+    """Load full rows saved behind ``summary.full_result_ref.result_id``."""
+    path = _lossless_result_path(result_id)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    rows = payload.get("rows", [])
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def infer_evidence_shape(*, question: str, intent: str, result_mode: str = "") -> str:
@@ -356,6 +262,23 @@ def _preferred_metric(columns: list[str]) -> str:
     return columns[0]
 
 
+def _cache_lossless_rows_to_vault(result_id: str, rows: list[dict[str, Any]]) -> None:
+    path = _lossless_result_path(result_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"rows": rows}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _lossless_result_path(result_id: str):
+    from gateway_core.tools.artifact_store import artifact_root
+
+    safe_id = "".join(ch for ch in str(result_id or "") if ch.isalnum() or ch in {"_", "-"})
+    if not safe_id.startswith("res_idx_"):
+        raise ValueError("invalid lossless result id")
+    return artifact_root() / "active_session_clues" / f"{safe_id}.json"
+
+
 def _sort_rows_by_metric(rows: list[dict[str, Any]], metric_col: str | None) -> list[dict[str, Any]]:
     if not metric_col:
         return rows
@@ -432,25 +355,14 @@ def _domain_key(
     field_labels: dict[str, str],
     rows: list[dict[str, Any]],
 ) -> str:
-    haystack = " ".join(
-        [
-            str(question or ""),
-            " ".join(str(item or "") for item in referenced_views),
-            " ".join(str(key or "") for key in field_labels),
-            " ".join(str(value or "") for value in field_labels.values()),
-            " ".join(str(key or "") for row in rows[:1] for key in row),
-        ]
-    ).lower()
-    return max(
-        [(0, "通用智慧校园")]
-        + [
-            (len(str(token)), domain)
-            for domain, tokens in DOMAIN_ROUTER_MATRIX.items()
-            for token in tokens
-            if str(token).lower() in haystack
-        ],
-        key=lambda item: item[0],
-    )[1]
+    decision = decide_lineage_route(
+        question=question,
+        table_names=referenced_views,
+        columns=[str(key or "") for row in rows[:1] for key in row],
+        field_labels=field_labels,
+        rows=rows,
+    )
+    return decision.domain_key
 
 
 def _truth_data_markdown(rows: list[dict[str, Any]]) -> str:

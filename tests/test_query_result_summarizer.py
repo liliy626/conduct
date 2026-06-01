@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from gateway_core.agents.school_sql.query_result_summarizer import summarize_query_result
+import pytest
+
+from gateway_core.agents.school_sql.lineage_route import decide_lineage_route
+from gateway_core.agents.school_sql.query_result_summarizer import load_lossless_result_rows, summarize_query_result
+
+
+@pytest.fixture(autouse=True)
+def _artifact_vault(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GATEWAY_ARTIFACT_DIR", str(tmp_path))
 
 
 def _summary(*, question: str, referenced_views: list[str] | None = None, rows: list[dict] | None = None) -> dict:
@@ -24,6 +32,28 @@ def test_teacher_leave_routes_to_hr_bar_line() -> None:
     assert summary["domain_key"] == "人事线"
     assert "人事处/教师工作部" in summary["domain_role_preset"]
     assert "张老师" in summary["truth_data_markdown"]
+
+
+def test_leave_table_lineage_overrides_moral_department_keyword() -> None:
+    summary = _summary(
+        question="调取一下最近德育处老师的请假审批和加班工时明细。",
+        referenced_views=["zx_mlh.教师销假_请假明细"],
+        rows=[{"教师姓名": "王老师", "部门名称": "德育处", "请假工时": 4.0}],
+    )
+
+    assert summary["domain_key"] == "人事线"
+
+
+def test_lineage_route_decision_uses_table_lineage_before_question_terms() -> None:
+    decision = decide_lineage_route(
+        question="调取一下最近德育处老师的请假审批和加班工时明细。",
+        table_names=["zx_mlh.教师销假_请假明细"],
+        columns=["教师姓名", "部门名称", "请假工时"],
+    )
+
+    assert decision.domain_key == "人事线"
+    assert decision.confidence == 1.0
+    assert any("教师销假_请假明细" in table for table in decision.matched_tables)
 
 
 def test_conduct_routes_to_student_moral_bar_line() -> None:
@@ -97,3 +127,19 @@ def test_query_summarizer_express_locker_lossless() -> None:
     assert "教研组-物理组" in tail["affected_departments"]
     assert "少先队大队部" in tail["affected_departments"]
     assert tail["total_metric_value"] == 112 * 2.0
+
+
+def test_query_summarizer_lossless_ref_points_to_stored_rows(tmp_path, monkeypatch) -> None:
+    rows = [{"姓名": "教师_1", "部门名称": "教研组-数学组", "请假工时": 2.5}]
+
+    summary = summarize_query_result(
+        intent="rank",
+        row_count=1,
+        formatted_rows=rows,
+        field_labels={},
+        question="本学期全校教师请假概况如何？",
+        referenced_views=["zx_mlh.教师销假_请假明细"],
+    )
+
+    stored_rows = load_lossless_result_rows(summary["full_result_ref"]["result_id"])
+    assert stored_rows == rows
