@@ -5,6 +5,30 @@ from decimal import Decimal
 from typing import Any
 
 
+DOMAIN_ROLE_PRESETS = {
+    "attendance": (
+        "【角色指引：校园人资与行政总监】\n"
+        "你现在是校园高级行政主管。分析假勤数据时，请优先捕捉出勤异常波动、"
+        "教研组或人员假勤离散度、集中时段与需要关怀的团队，给校长兼具温度与硬度的人效治理洞察。"
+    ),
+    "conduct": (
+        "【角色指引：德育处主任与学生发展总监】\n"
+        "你现在是资深德育考评官。分析行规扣分、违纪、常规检查数据时，请从校园安全、"
+        "班风建设和行为习惯出发，直接指出红黑榜势态、偏离规范基准的行为指标和可落地的德育建议。"
+    ),
+    "general": (
+        "【角色指引：智慧校园首席数据洞察官】\n"
+        "你现在是学校管理层信任的数据智囊。请以信息密度高、结论诚实、咬合数据血缘的方式回答，"
+        "不要空泛总结，不讲没有数据支撑的套话。"
+    ),
+}
+
+DOMAIN_ROUTER_MATRIX = {
+    "attendance": ("请假", "销假", "假勤", "考勤", "teacher_leave", "leave"),
+    "conduct": ("行规", "德育", "扣分", "违纪", "纪律", "眼保健操", "conduct", "moral", "score"),
+}
+
+
 def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
     value = os.getenv(primary, "").strip()
     if value:
@@ -22,6 +46,8 @@ def summarize_query_result(
     row_count: int,
     formatted_rows: list[dict[str, Any]],
     field_labels: dict[str, str],
+    question: str = "",
+    referenced_views: list[str] | None = None,
 ) -> dict[str, Any]:
     """Compress query rows into a small, LLM-friendly evidence summary.
 
@@ -35,6 +61,7 @@ def summarize_query_result(
     top_limit = _env_int("SCHOOL_REACT_TOP_ITEM_LIMIT", 10, min_value=1, max_value=30, legacy="TENANT_REACT_TOP_ITEM_LIMIT")
     numeric_columns = _numeric_columns(rows)
     dimension_columns = _dimension_columns(rows, numeric_columns)
+    domain_key = _domain_key(question=question, referenced_views=referenced_views or [], field_labels=field_labels, rows=rows)
     one_row_summary = rows[0] if len(rows) == 1 else {}
     top_items = rows[:top_limit] if clean_intent in {"group_count", "group_sum", "rank", "trend"} else []
     row_sample = rows[:sample_limit] if clean_intent in {"list", "detail"} else []
@@ -45,6 +72,9 @@ def summarize_query_result(
         "field_labels": field_labels,
         "dimensions": dimension_columns,
         "metrics": numeric_columns,
+        "domain_key": domain_key,
+        "domain_role_preset": DOMAIN_ROLE_PRESETS[domain_key],
+        "truth_data_markdown": _truth_data_markdown(rows),
         "one_row_summary": one_row_summary,
         "top_items": top_items,
         "row_sample": row_sample,
@@ -197,6 +227,60 @@ def _preferred_metric(columns: list[str]) -> str:
             if token in column:
                 return column
     return columns[0]
+
+
+def _domain_key(
+    *,
+    question: str,
+    referenced_views: list[str],
+    field_labels: dict[str, str],
+    rows: list[dict[str, Any]],
+) -> str:
+    haystack = " ".join(
+        [
+            str(question or ""),
+            " ".join(str(item or "") for item in referenced_views),
+            " ".join(str(key or "") for key in field_labels),
+            " ".join(str(value or "") for value in field_labels.values()),
+            " ".join(str(key or "") for row in rows[:1] for key in row),
+        ]
+    ).lower()
+    return max(
+        [(0, "general")]
+        + [
+            (len(str(token)), domain)
+            for domain, tokens in DOMAIN_ROUTER_MATRIX.items()
+            for token in tokens
+            if str(token).lower() in haystack
+        ],
+        key=lambda item: item[0],
+    )[1]
+
+
+def _truth_data_markdown(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    row_limit = _env_int("SCHOOL_REACT_TRUTH_TABLE_ROW_LIMIT", 12, min_value=1, max_value=30)
+    col_limit = _env_int("SCHOOL_REACT_TRUTH_TABLE_COL_LIMIT", 8, min_value=1, max_value=20)
+    columns = list(rows[0].keys())[:col_limit]
+    if not columns:
+        return ""
+    lines = [
+        "【真实数据快照】",
+        "| " + " | ".join(_markdown_cell(column) for column in columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    lines.extend(
+        "| " + " | ".join(_markdown_cell(row.get(column)) for column in columns) + " |"
+        for row in rows[:row_limit]
+    )
+    if len(rows) > row_limit:
+        lines.append(f"（仅展示前 {row_limit} 行，实际返回 {len(rows)} 行。）")
+    return "\n".join(lines)
+
+
+def _markdown_cell(value: Any) -> str:
+    return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ").strip()
 
 
 def _row_label(row: dict[str, Any], dimension_columns: list[str]) -> str:

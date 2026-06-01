@@ -48,6 +48,7 @@ IMAGE_MASTER_TEMPLATE = (
     "用户原始问题：{user_goal_text}\n"
     "最终回答结论：{answer_context}\n"
     "用户分析目标：{analytic_goal}\n"
+    "真实数据快照：\n{data_snapshot}\n"
     "【画面主题】\n"
     "{style_theme}，{entity_context}。\n\n"
     "【视觉与设计规范】\n"
@@ -142,6 +143,7 @@ def render_triple_axis_prompt(
     tables: list[str],
     row_count: int,
     answer_context: str = "",
+    data_snapshot: str = "",
     style_themes: dict[str, str],
     style_router_matrix: dict[str, tuple[str, ...]],
     entity_contexts: dict[str, str],
@@ -158,6 +160,7 @@ def render_triple_axis_prompt(
         user_goal_text=_latest_user_message_text(history_messages, purpose),
         answer_context=answer_text or "本轮尚未形成可视化结论，请仅画通用校园管理插图。",
         analytic_goal=ANALYTIC_GOAL_LABELS[analytic_goal_key],
+        data_snapshot=str(data_snapshot or f"本次查询返回 {row_count} 条真实记录。").strip(),
         style_theme=style_themes[style_key],
         entity_context=entity_contexts[entity_key].format(purpose=purpose),
     )

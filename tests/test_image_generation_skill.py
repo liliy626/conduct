@@ -329,8 +329,8 @@ def test_image_generation_skill_prompt_uses_answer_context_not_aggregate_top_ite
 
     assert "本学期全校教师请假概况如何？生成一张纯中文管理图" in payload["prompt_used"]
     assert "结论：教师请假排行已完成，最高请假次数为8次，总体呈现头部集中。" in payload["prompt_used"]
-    assert "张老师" not in payload["prompt_used"]
-    assert "总请假时长_小时：32.5" not in payload["prompt_used"]
+    assert "张老师" in payload["prompt_used"]
+    assert "32.5" in payload["prompt_used"]
 
 
 def test_sql_lineage_preserves_limited_row_sample_for_visual_workers() -> None:
@@ -428,9 +428,39 @@ def test_image_artifact_event_streams_markdown_and_sources() -> None:
     assert "![智能校园大屏分析插图](https://cdn.example.test/img_demo.png)" in content
     source_payloads = [payload for payload in payloads if payload.get("sources")]
     assert len(source_payloads) == 1
+    assert "citations" not in source_payloads[0]
     metadata = source_payloads[0]["sources"][0]["metadata"][0]
     assert metadata["type"] == "image_artifact"
     assert metadata["linked_sql_hash"] == SQL_HASH
+
+
+def test_runtime_response_sources_do_not_duplicate_into_citations() -> None:
+    from gateway_core.api.openai_compat.chat_pipeline_parts import response_parts
+
+    sources = [{"source": {"name": "SQL执行证据", "url": ""}, "document": ["ok"]}]
+    non_stream = response_parts.runtime_non_stream_response(
+        model_id="yili-model",
+        completion_id="chatcmpl-test",
+        text="ok",
+        now_ts=lambda: 1,
+        sources=sources,
+    )
+    stream_payload = _json_chunks(
+        [
+            response_parts.runtime_stream_chunk(
+                model_id="yili-model",
+                completion_id="chatcmpl-test",
+                delta="",
+                now_ts=lambda: 1,
+                sources=sources,
+            )
+        ]
+    )[0]
+
+    assert "url" not in non_stream["sources"][0]["source"]
+    assert "url" not in stream_payload["sources"][0]["source"]
+    assert "citations" not in non_stream
+    assert "citations" not in stream_payload
 
 
 def test_image_artifact_event_uses_output_render_matrix(monkeypatch) -> None:

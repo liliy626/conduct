@@ -25,6 +25,7 @@ class TripleAxisPromptSynthesizer:
         tables: list[str],
         row_count: int,
         answer_context: str = "",
+        data_snapshot: str = "",
     ) -> str:
         return render_triple_axis_prompt(
             history_messages=history_messages,
@@ -32,6 +33,7 @@ class TripleAxisPromptSynthesizer:
             tables=tables,
             row_count=row_count,
             answer_context=answer_context,
+            data_snapshot=data_snapshot,
             style_themes=IMAGE_STYLE_THEMES,
             style_router_matrix=STYLE_ROUTER_MATRIX,
             entity_contexts=IMAGE_ENTITY_CONTEXTS,

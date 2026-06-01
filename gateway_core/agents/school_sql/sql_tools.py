@@ -554,6 +554,8 @@ class DDLReactTools:
                 row_count=len(rows),
                 formatted_rows=formatted_rows,
                 field_labels=field_labels,
+                question=self.question,
+                referenced_views=[f"{table_ref[0]}.{table_ref[1]}"],
             )
             selected = self._selected_dataset_payloads(guardrail.referenced_views)
             payload = {
@@ -854,6 +856,8 @@ class DDLReactTools:
                 row_count=len(rows),
                 formatted_rows=formatted_rows,
                 field_labels=field_labels,
+                question=self.question,
+                referenced_views=guardrail.referenced_views,
             )
             if total_row_count is not None:
                 evidence_summary["total_row_count"] = total_row_count

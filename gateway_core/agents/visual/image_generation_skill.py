@@ -60,6 +60,7 @@ class ImageGenerationSkill(BaseMultimodalAgentSkill):
             tables=tables,
             row_count=row_count,
             answer_context=_latest_answer_context(state, fallback=purpose),
+            data_snapshot=_lineage_data_snapshot(evidence),
         )
         prompt = f"{prompt}\n数据指纹：已绑定。"
         yield SkillEvent(event_type="process", data={"text": "正在生成校园大屏可视化插图...\n"})
@@ -168,6 +169,33 @@ def _primary_sql_lineage(lineages: list[dict[str, Any]]) -> dict[str, Any]:
         if _lineage_row_count(lineage) > 0:
             return lineage
     return next(reversed(lineages))
+
+
+def _lineage_data_snapshot(lineage: dict[str, Any]) -> str:
+    summary = lineage.get("evidence_summary")
+    if isinstance(summary, dict) and summary.get("truth_data_markdown"):
+        return str(summary["truth_data_markdown"])
+    rows = lineage.get("row_sample")
+    if not isinstance(rows, list) or not rows:
+        return f"本次查询返回 {max(_lineage_row_count(lineage), 0)} 条真实记录。"
+    clean_rows = [row for row in rows if isinstance(row, dict)]
+    if not clean_rows:
+        return f"本次查询返回 {max(_lineage_row_count(lineage), 0)} 条真实记录。"
+    columns = list(clean_rows[0].keys())[:6]
+    lines = [
+        "【真实数据快照】",
+        "| " + " | ".join(_markdown_cell(column) for column in columns) + " |",
+        "| " + " | ".join("---" for _ in columns) + " |",
+    ]
+    lines.extend(
+        "| " + " | ".join(_markdown_cell(row.get(column)) for column in columns) + " |"
+        for row in clean_rows[:8]
+    )
+    return "\n".join(lines)
+
+
+def _markdown_cell(value: Any) -> str:
+    return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ").strip()
 
 
 def _record_multimodal_error(
