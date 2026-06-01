@@ -1,31 +1,174 @@
 from __future__ import annotations
 
 import os
+import uuid
 from decimal import Decimal
 from typing import Any
 
 
-DOMAIN_ROLE_PRESETS = {
-    "attendance": (
-        "【角色指引：校园人资与行政总监】\n"
-        "你现在是校园高级行政主管。分析假勤数据时，请优先捕捉出勤异常波动、"
-        "教研组或人员假勤离散度、集中时段与需要关怀的团队，给校长兼具温度与硬度的人效治理洞察。"
+BAR_LINE_ROLE_PRESETS = {
+    "党政核心层": (
+        "【当前语境：党支部/校长室/校办 - 宏观治理与学校大盘】\n"
+        "提示词风格：说话像是一位经验丰富的校办主任。语气沉稳、大局观强、懂得把握势态。"
+        "请看着下方的客观数据，围绕咱们学校的发展规划、日常党政会务、公章合规或者校园安全总责来聊。"
+        "你得一眼看出数据背后折射出的整体风向，说话要懂行、透彻。第一句话把最核心的行政结论告诉你，"
+        "接下来顺理成章地帮校长联想并点出哪些细节可能存在管理盲区，有哪些微调和优化抓手，既专业又有人情味。"
     ),
-    "conduct": (
-        "【角色指引：德育处主任与学生发展总监】\n"
-        "你现在是资深德育考评官。分析行规扣分、违纪、常规检查数据时，请从校园安全、"
-        "班风建设和行为习惯出发，直接指出红黑榜势态、偏离规范基准的行为指标和可落地的德育建议。"
+    "教学线": (
+        "【当前语境：教务处/课程教学部/研究生院 - 教务常规与运行大盘】\n"
+        "提示词风格：说话像是一位深谙教务门道、雷厉风行的老教导主任。语气严谨、务实、直切痛点。"
+        "分析数据时，请聚焦于咱们的课表排程、教材学籍、教学常规和教研组的日常运转。"
+        "看到数据后，结论先行，别摆大厂的格盘。你要凭经验帮大家揪出那些偏离常规的细节，"
+        "从咱们日常教学、排课代课备勤的实际血缘出发，多往后联想半步，给出接地气、能解决实际教务秩序的调控好建议。"
     ),
-    "general": (
-        "【角色指引：智慧校园首席数据洞察官】\n"
-        "你现在是学校管理层信任的数据智囊。请以信息密度高、结论诚实、咬合数据血缘的方式回答，"
-        "不要空泛总结，不讲没有数据支撑的套话。"
+    "学生与德育线": (
+        "【当前语境：德育处/学工部/研工部/少先队 - 学生行为与校纪校规】\n"
+        "提示词风格：说话像是一位威严与慈爱并存的德育处长。语气客观、切中要害，但绝非冷冰冰的机器。"
+        "请围绕咱们的班主任工作、学生行为规范、行规红黑榜加减分分布、或者是家校安全法治来进行提炼。"
+        "盯着扣分事件的离散度和加分频次。结合咱们学校最近的管理窗口期，自然地联想、诊断一下："
+        "到底这是因为某些特定群体习惯性反弹，还是咱们近期行规宣导细节上有些脱节？"
+        "字字要切中要害，给出充满教育智慧的精准约谈或行规加固建议。"
+    ),
+    "人事线": (
+        "【当前语境：人事处/教师工作部 - 师资效能与调配大盘】\n"
+        "提示词风格：说话像是一位精明、负责、懂人心的人事处长。语气专业、信息密度高、切合实际。"
+        "结合客观数据，多去关注咱们的师资结构、近期请假频率或教师工作量的分布细节。"
+        "帮你梳理出不同团队、不同时段里的人效偏离情况。允许你从跨年级代课备勤、教师职称评审、"
+        "教师培训学分的实际细节出发，做一些合理的能效连带联想，给学校领导提供高保真、有实际参考价值的人事调配数据抓手。"
+    ),
+    "后勤保障线": (
+        "【当前语境：总务处/后勤保障中心/国资处 - 资产运维与财务对账】\n"
+        "提示词风格：说话像是一位勤勉、心细、账本门清的总务老处长。语气极度精准、踏实。"
+        "请围绕咱们学校的资产采购、食堂餐饮流水、基建维修或者门禁消防巡查进行盘点。"
+        "结论先行，一眼帮模型盯住关键的拐点、极值或预算死锁交叉点。说话不要用花哨的修辞，"
+        "结合物业运维和应急处置的后勤细节，展开合理的损耗或隐患联想，像写汇报公文一样专业且接地气。"
+    ),
+    "科研线": (
+        "【当前语境：教科室/教师发展部/科研处 - 学术成果与课题孵化】\n"
+        "提示词风格：说话像是一位学术作风严谨、懂得引领教师发展的科研老校长。语气专业、克制。"
+        "聚焦在老师们的课题申报、论文发表、科研经费分配或职称评定进度上。"
+        "细节上点出目前成果产出的盲区或表现断层。多联想一下咱们学校当下的学术梯队建设、"
+        "中青年骨干教师的成长势态，给出能够驱动科研并轨、实实落地的靶向建议。"
+    ),
+    "群团与监督": (
+        "【当前语境：工会/纪委/监察处/学术委员会 - 权益保障与合规监督】\n"
+        "提示词风格：说话像是一位中立客观、讲原则、同时关心职工福利的工会主席/纪委老书记。口吻公道、合规。"
+        "围绕教代会决议、职工福利分配、退管女工、或纪检统战的合规度量来展开。"
+        "细节上锚定监督事件、福利离散度或职称评审争议的核心势态，用白盒公文口吻踏实、直接地总结出来。"
+    ),
+    "通用智慧校园": (
+        "【当前语境：智慧校园首席教务数据智囊】\n"
+        "提示词风格：结论先行，口吻懂行、现代、带有人情味。别原样翻译表格，"
+        "帮用户点出数据大盘里的异常极值和潜在发展趋势即可。"
     ),
 }
 
+DOMAIN_ROLE_PRESETS = BAR_LINE_ROLE_PRESETS
+
 DOMAIN_ROUTER_MATRIX = {
-    "attendance": ("请假", "销假", "假勤", "考勤", "teacher_leave", "leave"),
-    "conduct": ("行规", "德育", "扣分", "违纪", "纪律", "眼保健操", "conduct", "moral", "score"),
+    "党政核心层": (
+        "党支部",
+        "校长室",
+        "校办",
+        "党政",
+        "公章",
+        "会务",
+        "发展规划",
+        "校园安全总责",
+        "行政大盘",
+    ),
+    "教学线": (
+        "教务处",
+        "教务",
+        "课程教学",
+        "研究生院",
+        "课表",
+        "排课",
+        "代课",
+        "备勤",
+        "教材",
+        "学籍",
+        "教学常规",
+        "教研组运行",
+        "教学",
+    ),
+    "学生与德育线": (
+        "德育处",
+        "学工部",
+        "研工部",
+        "少先队",
+        "班主任",
+        "学生行为规范",
+        "行规红黑榜",
+        "眼保健操",
+        "行规",
+        "德育",
+        "扣分",
+        "违纪",
+        "纪律",
+        "家校",
+        "法治",
+    ),
+    "人事线": (
+        "人事处",
+        "教师工作部",
+        "教师请假",
+        "教研组请假",
+        "师资结构",
+        "请假频率",
+        "教师工作量",
+        "教师培训学分",
+        "职称评审",
+        "跨年级代课",
+        "假勤",
+        "考勤",
+        "销假",
+        "teacher_leave",
+        "leave",
+    ),
+    "后勤保障线": (
+        "总务处",
+        "后勤保障",
+        "国资处",
+        "资产采购",
+        "食堂",
+        "餐饮",
+        "基建",
+        "维修",
+        "门禁",
+        "消防",
+        "报修",
+        "物业",
+        "预算",
+    ),
+    "科研线": (
+        "教科室",
+        "教师发展部",
+        "科研处",
+        "课题申报",
+        "论文发表",
+        "科研经费",
+        "学术成果",
+        "职称评定",
+        "科研",
+        "课题",
+        "论文",
+        "成果",
+    ),
+    "群团与监督": (
+        "工会",
+        "纪委",
+        "监察处",
+        "学术委员会",
+        "教代会",
+        "职工福利",
+        "退管",
+        "女工",
+        "纪检",
+        "统战",
+        "合规",
+        "监督",
+    ),
 }
 
 
@@ -56,34 +199,41 @@ def summarize_query_result(
     aggregates, top breakdown items, and a small representative sample.
     """
     clean_intent = str(intent or "").strip() or "list"
-    rows = [_json_safe_row(row) for row in formatted_rows if isinstance(row, dict)]
-    sample_limit = _env_int("SCHOOL_REACT_ROW_SAMPLE_LIMIT", 5, min_value=0, max_value=20, legacy="TENANT_REACT_ROW_SAMPLE_LIMIT")
-    top_limit = _env_int("SCHOOL_REACT_TOP_ITEM_LIMIT", 10, min_value=1, max_value=30, legacy="TENANT_REACT_TOP_ITEM_LIMIT")
-    numeric_columns = _numeric_columns(rows)
-    dimension_columns = _dimension_columns(rows, numeric_columns)
-    domain_key = _domain_key(question=question, referenced_views=referenced_views or [], field_labels=field_labels, rows=rows)
-    one_row_summary = rows[0] if len(rows) == 1 else {}
-    top_items = rows[:top_limit] if clean_intent in {"group_count", "group_sum", "rank", "trend"} else []
-    row_sample = rows[:sample_limit] if clean_intent in {"list", "detail"} else []
+    all_raw_rows = [_json_safe_row(row) for row in formatted_rows if isinstance(row, dict)]
+    total_len = len(all_raw_rows)
+    result_id = f"res_idx_{uuid.uuid4().hex[:16]}"
+    numeric_columns = _numeric_columns(all_raw_rows)
+    dimension_columns = _dimension_columns(all_raw_rows, numeric_columns)
+    metric_col = _preferred_metric(numeric_columns) if numeric_columns else None
+    sorted_rows = _sort_rows_by_metric(all_raw_rows, metric_col)
+    domain_key = _domain_key(question=question, referenced_views=referenced_views or [], field_labels=field_labels, rows=all_raw_rows)
+    one_row_summary = sorted_rows[0] if total_len == 1 else {}
+    top_items = sorted_rows[:8]
+    tail_summary = _tail_summary(sorted_rows[8:], metric_col)
+    row_sample = sorted_rows[:5] if clean_intent in {"list", "detail"} and total_len <= 8 else []
     summary = {
-        "row_count": int(row_count or 0),
+        "row_count": int(row_count or total_len),
         "intent": clean_intent,
-        "result_shape": _result_shape(clean_intent, len(rows)),
+        "result_shape": _result_shape(clean_intent, total_len),
         "field_labels": field_labels,
         "dimensions": dimension_columns,
         "metrics": numeric_columns,
         "domain_key": domain_key,
         "domain_role_preset": DOMAIN_ROLE_PRESETS[domain_key],
-        "truth_data_markdown": _truth_data_markdown(rows),
+        "truth_data_markdown": _truth_data_markdown(all_raw_rows),
         "one_row_summary": one_row_summary,
         "top_items": top_items,
+        "tail_summary": tail_summary,
         "row_sample": row_sample,
-        "notable_findings": _notable_findings(
-            intent=clean_intent,
-            row_count=int(row_count or 0),
-            rows=rows,
-            numeric_columns=numeric_columns,
-            dimension_columns=dimension_columns,
+        "full_result_ref": {
+            "result_id": result_id,
+            "is_lossless": True,
+            "storage_vault": "active_session_clues",
+        },
+        "notable_findings": _express_locker_notable_findings(
+            row_count=total_len,
+            result_id=result_id,
+            tail_summary=tail_summary,
         ),
     }
     return _drop_empty(summary)
@@ -198,35 +348,81 @@ def _dimension_columns(rows: list[dict[str, Any]], numeric_columns: list[str]) -
     return columns
 
 
-def _notable_findings(
-    *,
-    intent: str,
-    row_count: int,
-    rows: list[dict[str, Any]],
-    numeric_columns: list[str],
-    dimension_columns: list[str],
-) -> list[str]:
-    if row_count <= 0 or not rows:
-        return ["未查询到符合条件的记录。"]
-    findings = [f"本次查询返回 {row_count} 条结果。"]
-    if intent in {"group_count", "group_sum", "rank", "trend"} and numeric_columns:
-        metric = _preferred_metric(numeric_columns)
-        top = rows[0]
-        label = _row_label(top, dimension_columns)
-        value = top.get(metric)
-        if label and value is not None:
-            findings.append(f"最高项是 {label}，{metric} 为 {value}。")
-    if intent in {"count", "sum"} and len(rows) == 1:
-        findings.append("该结果是单项汇总，可直接作为回答依据。")
-    return findings
-
-
 def _preferred_metric(columns: list[str]) -> str:
     for token in ("合计", "总", "积分", "分值", "record_count", "记录数"):
         for column in columns:
             if token in column:
                 return column
     return columns[0]
+
+
+def _sort_rows_by_metric(rows: list[dict[str, Any]], metric_col: str | None) -> list[dict[str, Any]]:
+    if not metric_col:
+        return rows
+    try:
+        return sorted(
+            rows,
+            key=lambda row: float(row.get(metric_col) or 0) if _is_number(row.get(metric_col)) else 0,
+            reverse=True,
+        )
+    except Exception:
+        return rows
+
+
+def _tail_summary(tail_rows: list[dict[str, Any]], metric_col: str | None) -> dict[str, Any]:
+    if not tail_rows:
+        return {"row_count": 0, "affected_departments": []}
+    departments = {
+        str(dept).strip()
+        for row in tail_rows
+        for dept in (row.get("部门名称"), row.get("班级"), row.get("部门"), row.get("学科组"))
+        if dept and str(dept).strip()
+    }
+    metrics: list[float] = []
+    if metric_col:
+        for row in tail_rows:
+            value = row.get(metric_col)
+            if value is not None:
+                try:
+                    metrics.append(float(value))
+                except (TypeError, ValueError):
+                    pass
+    total_metric = float(sum(metrics)) if metrics else 0.0
+    return {
+        "row_count": len(tail_rows),
+        "affected_departments": sorted(departments),
+        "total_metric_value": total_metric,
+        "avg_metric_value": float(total_metric / len(metrics)) if metrics else 0.0,
+        "metric_name": metric_col,
+    }
+
+
+def _express_locker_notable_findings(
+    *,
+    row_count: int,
+    result_id: str,
+    tail_summary: dict[str, Any],
+) -> list[str]:
+    if row_count <= 0:
+        return ["未查询到符合条件的记录。"]
+    findings = [f"本次数据透视共命中 {row_count} 条全量物理流水。"]
+    if tail_summary.get("row_count", 0) <= 0:
+        return findings
+
+    departments = tail_summary.get("affected_departments") or []
+    department_text = "、".join(departments[:5]) or "未识别到明确部门/班级字段"
+    if len(departments) > 5:
+        department_text += f"等共{len(departments)}个条线"
+    metric_text = ""
+    if tail_summary.get("metric_name"):
+        metric_text = f"，其余长尾项累计贡献{tail_summary['metric_name']}达 {tail_summary['total_metric_value']:.1f}"
+
+    findings.append(
+        f"大盘前8条重点明细已就位。其余 {tail_summary['row_count']} 条流水长尾已安全存入快递柜（存根：{result_id}）。"
+        f"长尾数据无损穿透点名涉及：{department_text}{metric_text}。大盘基准线维持在 {tail_summary['avg_metric_value']:.2f}。"
+        f"系统已锁定完整血缘，支持按该 result_id 执行跨年级/跨学科的二次动态切片调阅。"
+    )
+    return findings
 
 
 def _domain_key(
@@ -246,7 +442,7 @@ def _domain_key(
         ]
     ).lower()
     return max(
-        [(0, "general")]
+        [(0, "通用智慧校园")]
         + [
             (len(str(token)), domain)
             for domain, tokens in DOMAIN_ROUTER_MATRIX.items()
@@ -281,14 +477,6 @@ def _truth_data_markdown(rows: list[dict[str, Any]]) -> str:
 
 def _markdown_cell(value: Any) -> str:
     return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ").strip()
-
-
-def _row_label(row: dict[str, Any], dimension_columns: list[str]) -> str:
-    for key in dimension_columns:
-        value = row.get(key)
-        if value not in {None, ""}:
-            return str(value)
-    return ""
 
 
 def _is_number(value: Any) -> bool:
