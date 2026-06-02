@@ -255,7 +255,6 @@ def _llm_slide_prompt(*, title: str, slides: List[Dict[str, Any]], charts: List[
         f"主题：{title}",
         "",
         "请把以下页面草稿、图表和证据整理成一份中文学校管理汇报 PPT 大纲。",
-        "风格要求：专业、结论先行、面向校长/中层管理者；页面标题要能表达判断，不要只写“数据概览”。",
         "事实边界：只能使用给定证据；如果证据不足，用“需补充核实”表达，不要编造数字、政策或链接。",
         "输出 JSON schema：",
         '{"title":"PPT标题","slides":[{"title":"页面标题","bullets":["3到6条短句"],"speaker_notes":"可选备注"}]}',

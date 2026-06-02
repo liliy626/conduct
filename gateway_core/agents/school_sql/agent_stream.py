@@ -24,7 +24,7 @@ from gateway_core.agents.school_sql.sql_tools import DDLReactTools
 from gateway_core.infra.api_keys import current_api_key_record, is_school_record
 from gateway_core.runtime.runtime_trace_context import _add_trace_usage
 from gateway_core.school.schema_indexer import build_school_schema_index
-from gateway_core.school.trace import finish_trace, new_tenant_trace, set_step_output, trace_step
+from gateway_core.school.trace import finish_trace, new_tenant_trace, set_step_output, trace_preview, trace_step
 
 
 _AGENT_NATIVE_MEMORY = MemorySaver()
@@ -54,6 +54,20 @@ async def stream_school_sql_agent_native(
     natural-language answer.
     """
     trace = new_tenant_trace(question)
+    final_answer_chunks: list[str] = []
+    final_answer_source = "direct_agent_content"
+
+    def _content_event(text: str) -> dict[str, str]:
+        final_answer_chunks.append(str(text or ""))
+        return {"type": "content", "text": str(text or "")}
+
+    def _record_final_answer() -> None:
+        answer = _sanitize_final_answer("".join(final_answer_chunks))
+        if not answer:
+            return
+        with trace_step(trace, "chat_completion.final", {"question": question}) as step:
+            set_step_output(step, {"final_answer": answer, "answer_source": final_answer_source})
+
     try:
         with trace_step(
             trace,
@@ -79,14 +93,28 @@ async def stream_school_sql_agent_native(
                 },
             )
 
-        if await _is_guard_router_chat(trace=trace, model=model, question=question):
+        is_chat_route = await _is_guard_router_chat(trace=trace, model=model, question=question)
+        with trace_step(trace, "route_result", {"question": question}) as step:
+            set_step_output(
+                step,
+                {
+                    "decision": "chat" if is_chat_route else "data",
+                    "route": "guard_router" if is_chat_route else "school_sql_agent",
+                    "input": {"question": question, "conversation_context_chars": len(str(conversation_context or ""))},
+                    "output": {"uses_database_agent": not is_chat_route},
+                    "error": None,
+                },
+            )
+        if is_chat_route:
+            final_answer_source = "guard_router"
             async for chunk in _stream_guard_router_chat(
                 trace=trace,
                 model=model,
                 question=question,
                 conversation_context=conversation_context,
             ):
-                yield {"type": "content", "text": chunk}
+                yield _content_event(chunk)
+            _record_final_answer()
             finish_trace(trace)
             return
 
@@ -96,6 +124,16 @@ async def stream_school_sql_agent_native(
             dsn=dsn,
             psycopg_module=psycopg_module,
         )
+        with trace_step(trace, "metadata_selection", {"question": question, "schema_name": schema_index.source_schema}) as step:
+            set_step_output(
+                step,
+                {
+                    "input": {"question": question, "schema_name": schema_index.source_schema},
+                    "decision": {"source": _schema_index_source(schema_index), "dataset_count": len(schema_index.datasets)},
+                    "output": _index_trace_payload(schema_index, source=_schema_index_source(schema_index)),
+                    "error": None,
+                },
+            )
 
         tools = DDLReactTools(
             question=question,
@@ -109,7 +147,24 @@ async def stream_school_sql_agent_native(
         )
         sql_experience = tools.sql_experience_search(question)
         ddl_context = _schema_catalog_context(schema_index, question=question)
+        with trace_step(trace, "domain_context", {"question": question, "school_id": school_id}) as step:
+            set_step_output(
+                step,
+                {
+                    "input": {"question": question, "school_id": school_id, "schema_name": schema_index.source_schema},
+                    "decision": {
+                        "sql_experience_chars": len(str(sql_experience or "")),
+                        "ddl_context_chars": len(str(ddl_context or "")),
+                    },
+                    "output": {
+                        "sql_experience_preview": trace_preview(sql_experience),
+                        "ddl_context_preview": trace_preview(ddl_context),
+                    },
+                    "error": None,
+                },
+            )
         final_handoff_enabled = _final_handoff_enabled(final_model)
+        direct_snapshot_mode = _is_direct_snapshot_request(question)
         contract_plan = _plan_tool_contract(
             trace=trace,
             model=agent_model_for_tool_loop(model),
@@ -215,7 +270,7 @@ async def stream_school_sql_agent_native(
                 }
             asset_text = _event_asset_markdown(event)
             if asset_text:
-                yield {"type": "content", "text": asset_text}
+                yield _content_event(asset_text)
             if final_handoff_enabled and event.get("event") == "on_tool_end" and str(event.get("name") or "") == "final_answer_handoff":
                 handoff_block = _extract_final_handoff_block(_tool_output_text(event))
                 if handoff_block:
@@ -228,6 +283,8 @@ async def stream_school_sql_agent_native(
                         tools=tools,
                         caveat="final_answer_handoff returned an unparsable payload",
                     )
+                handoff_payload = _handoff_payload_with_tool_evidence(handoff_payload, tools=tools)
+                final_answer_source = "handoff"
                 async for chunk in _stream_fast_final_answer(
                     trace=trace,
                     final_model=final_model,
@@ -235,7 +292,7 @@ async def stream_school_sql_agent_native(
                     handoff_payload=handoff_payload,
                     source_views=tools.source_views,
                 ):
-                    yield {"type": "content", "text": chunk}
+                    yield _content_event(chunk)
                 final_handoff_done = True
                 break
             if event.get("event") == "on_chat_model_stream":
@@ -248,14 +305,16 @@ async def stream_school_sql_agent_native(
                 if buffer_tool_planning_content and _chunk_has_tool_calls(event):
                     llm_tool_call_runs.add(run_id)
                 if content:
-                    if final_handoff_enabled:
+                    if _should_suppress_natural_answer_for_direct_snapshot(question=question, tools=tools):
+                        yield {"type": "process", "text": _sanitize_process_text(content)}
+                    elif final_handoff_enabled:
                         llm_content_buffers.setdefault(run_id, []).append(content)
                         yield {"type": "process", "text": _sanitize_process_text(content)}
                     elif buffer_tool_planning_content and run_id in llm_structured_reasoning_runs:
-                        yield {"type": "content", "text": content}
+                        yield _content_event(content)
                     elif buffer_tool_planning_content:
                         if run_id in llm_streaming_answer_runs:
-                            yield {"type": "content", "text": content}
+                            yield _content_event(content)
                         else:
                             buffer = llm_content_buffers.setdefault(run_id, [])
                             buffer.append(content)
@@ -266,11 +325,11 @@ async def stream_school_sql_agent_native(
                                     if split["process"]:
                                         yield {"type": "process", "text": _sanitize_process_text(split["process"])}
                                     if split["answer"]:
-                                        yield {"type": "content", "text": split["answer"]}
+                                        yield _content_event(split["answer"])
                                     llm_streaming_answer_runs.add(run_id)
                                     llm_content_buffers.pop(run_id, None)
                     else:
-                        yield {"type": "content", "text": content}
+                        yield _content_event(content)
             if event.get("event") == "on_chat_model_end" and (final_handoff_enabled or buffer_tool_planning_content):
                 run_id = str(event.get("run_id") or "")
                 buffered_text = "".join(llm_content_buffers.pop(run_id, []))
@@ -278,6 +337,7 @@ async def stream_school_sql_agent_native(
                     handoff_payload = _extract_final_handoff_payload(buffered_text)
                     if handoff_payload and not final_handoff_done:
                         final_handoff_done = True
+                        handoff_payload = _handoff_payload_with_tool_evidence(handoff_payload, tools=tools)
                         async for chunk in _stream_fast_final_answer(
                             trace=trace,
                             final_model=final_model,
@@ -285,18 +345,20 @@ async def stream_school_sql_agent_native(
                             handoff_payload=handoff_payload,
                             source_views=tools.source_views,
                         ):
-                            yield {"type": "content", "text": chunk}
+                            yield _content_event(chunk)
                     elif buffered_text:
                         fallback_final_text = buffered_text
                 elif buffered_text:
-                    if _chat_model_end_has_tool_calls(event) or run_id in llm_tool_call_runs:
+                    if _should_suppress_natural_answer_for_direct_snapshot(question=question, tools=tools):
+                        yield {"type": "process", "text": _sanitize_process_text(buffered_text)}
+                    elif _chat_model_end_has_tool_calls(event) or run_id in llm_tool_call_runs:
                         yield {"type": "process", "text": _sanitize_process_text(buffered_text)}
                     else:
                         split = _split_buffered_deepseek_content(buffered_text, force=True)
                         if split["process"]:
                             yield {"type": "process", "text": _sanitize_process_text(split["process"])}
                         if split["answer"]:
-                            yield {"type": "content", "text": split["answer"]}
+                            yield _content_event(split["answer"])
                 llm_tool_call_runs.discard(run_id)
                 llm_streaming_answer_runs.discard(run_id)
                 llm_structured_reasoning_runs.discard(run_id)
@@ -314,6 +376,8 @@ async def stream_school_sql_agent_native(
                         "the final answer is generated from collected tool evidence only."
                     ),
                 )
+            handoff_payload = _handoff_payload_with_tool_evidence(handoff_payload, tools=tools)
+            final_answer_source = "fallback"
             async for chunk in _stream_fast_final_answer(
                 trace=trace,
                 final_model=final_model,
@@ -321,7 +385,15 @@ async def stream_school_sql_agent_native(
                 handoff_payload=handoff_payload,
                 source_views=tools.source_views,
             ):
-                yield {"type": "content", "text": chunk}
+                yield _content_event(chunk)
+        if direct_snapshot_mode and not final_handoff_enabled:
+            direct_answer = _direct_snapshot_answer(
+                question=question,
+                handoff_payload=_handoff_payload_with_tool_evidence({}, tools=tools),
+            )
+            if direct_answer:
+                final_answer_source = "direct_snapshot"
+                yield _content_event(direct_answer)
         sql_lineages = _sql_lineages_from_evidence_by_task(getattr(tools, "evidence_by_task", {}) or {})
         openwebui_sources = _openwebui_sources_from_tool_sources(citation_sources)
         if not openwebui_sources:
@@ -348,12 +420,14 @@ async def stream_school_sql_agent_native(
                     },
                 },
             )
+        _record_final_answer()
         finish_trace(trace)
     except Exception as exc:
         with trace_step(trace, "agent_native.error", {"question": question}) as step:
             set_step_output(step, {"error": str(exc)})
+        yield _content_event(build_upstream_error_text(exc))
+        _record_final_answer()
         finish_trace(trace)
-        yield {"type": "content", "text": build_upstream_error_text(exc)}
 
 
 def _plan_tool_contract(*, trace: Any, model: Any, question: str, conversation_context: str) -> Any:
@@ -374,12 +448,45 @@ def _plan_tool_contract(*, trace: Any, model: Any, question: str, conversation_c
         set_step_output(
             step,
             {
+                "input": {
+                    "question": question,
+                    "conversation_context_preview": trace_preview(conversation_context),
+                    "available_tools": available_tools,
+                },
+                "decision": {
+                    "required_outputs": list(plan.required_outputs),
+                    "allowed_tools": list(plan.allowed_tools),
+                    "answer_mode": plan.answer_mode,
+                },
+                "output": {
+                    "reason": plan.reason,
+                },
+                "error": None,
                 "required_outputs": list(plan.required_outputs),
                 "allowed_tools": list(plan.allowed_tools),
                 "answer_mode": plan.answer_mode,
                 "reason": plan.reason,
             },
         )
+        with trace_step(trace, "query_plan", {"question": question}) as plan_step:
+            set_step_output(
+                plan_step,
+                {
+                    "input": {
+                        "question": question,
+                        "conversation_context_preview": trace_preview(conversation_context),
+                        "available_tools": available_tools,
+                    },
+                    "decision": {
+                        "required_outputs": list(plan.required_outputs),
+                        "allowed_tools": list(plan.allowed_tools),
+                        "answer_mode": plan.answer_mode,
+                        "reason": plan.reason,
+                    },
+                    "output": {"tool_contract_seed": plan.trace_payload() if hasattr(plan, "trace_payload") else {}},
+                    "error": None,
+                },
+            )
         return plan
 
 
@@ -430,7 +537,7 @@ def _build_agent_schema_index(
             dsn=dsn,
             psycopg_module=psycopg_module,
         )
-        set_step_output(step, _index_trace_payload(schema_index, source="information_schema"))
+        set_step_output(step, _index_trace_payload(schema_index, source=_schema_index_source(schema_index)))
         return schema_index
 
 
@@ -444,6 +551,8 @@ def _require_school_api_key_record() -> Any:
 
 
 def _index_trace_payload(schema_index: Any, *, source: str) -> dict[str, Any]:
+    dataset_limit = _trace_int_env("GATEWAY_TRACE_METADATA_DATASET_LIMIT", "SCHOOL_TRACE_METADATA_DATASET_LIMIT", 50)
+    field_limit = _trace_int_env("GATEWAY_TRACE_METADATA_FIELD_LIMIT", "SCHOOL_TRACE_METADATA_FIELD_LIMIT", 30)
     return {
         "source": source,
         "school_id": schema_index.school_id,
@@ -451,6 +560,24 @@ def _index_trace_payload(schema_index: Any, *, source: str) -> dict[str, Any]:
         "schema_name": schema_index.source_schema,
         "datasets_count": len(schema_index.datasets),
         "fields_count": sum(len(dataset.fields) for dataset in schema_index.datasets),
+        "datasets": [
+            {
+                "dataset_id": dataset.dataset_id,
+                "label": dataset.label,
+                "source_view": dataset.source_view,
+                "fields_count": len(dataset.fields),
+                "fields": [
+                    {
+                        "field_id": str(getattr(field, "field_id", "") or ""),
+                        "source_field": str(getattr(field, "source_field", "") or ""),
+                        "label": str(getattr(field, "label", "") or ""),
+                        "type": str(getattr(field, "field_type", "") or ""),
+                    }
+                    for field in _business_trace_fields(list(dataset.fields), limit=field_limit)
+                ],
+            }
+            for dataset in schema_index.datasets[:dataset_limit]
+        ],
         "sample_datasets": [
             {
                 "dataset_id": dataset.dataset_id,
@@ -461,6 +588,46 @@ def _index_trace_payload(schema_index: Any, *, source: str) -> dict[str, Any]:
             for dataset in schema_index.datasets[:20]
         ],
     }
+
+
+def _business_trace_fields(fields: list[Any], *, limit: int) -> list[Any]:
+    out: list[Any] = []
+    for field in fields:
+        source_field = str(getattr(field, "source_field", "") or "")
+        field_id = str(getattr(field, "field_id", "") or "")
+        label = str(getattr(field, "label", "") or "")
+        text = f"{source_field} {field_id} {label}".lower()
+        if source_field.startswith("__") or field_id.split(".")[-1].startswith("__"):
+            continue
+        if any(token in text for token in ["tenant", "uuid", "instance_id", "raw_json", "raw_value", "app_code"]):
+            continue
+        out.append(field)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _trace_int_env(primary: str, legacy: str, default: int) -> int:
+    raw = _env_value(primary, legacy, str(default))
+    try:
+        return max(1, min(int(raw), 500))
+    except Exception:
+        return default
+
+
+def _schema_index_source(schema_index: Any) -> str:
+    datasets = list(getattr(schema_index, "datasets", []) or [])
+    sources = {
+        str(getattr(dataset, "raw", {}).get("source") or "").strip()
+        for dataset in datasets
+        if isinstance(getattr(dataset, "raw", None), dict)
+    }
+    sources.discard("")
+    if len(sources) == 1:
+        return next(iter(sources))
+    if sources:
+        return ",".join(sorted(sources))
+    return "unknown"
 
 
 def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
@@ -490,68 +657,29 @@ def _agent_native_prompt(
     available_tools = [name for name in (available_tool_names or []) if str(name or "").strip()]
     available_tools_text = "、".join(available_tools) if available_tools else "未提供"
     lines = [
-            "你是一个资深的学校数据分析专家与教学管理助手。",
-            "你现在是主问答 Agent：你要自己决定调用哪些工具，并直接给用户最终自然语言回答。",
-            "所有能力都在同一层 tools 中：ddl_search 查 DDL 表结构，sample_table_rows 看样例数据，inspect_jsonb_recordset 探测 JSONB 子表结构，jsonb_recordset_query 打平 JSONB 子表查询，sql_experience_search 查历史 SQL 经验，sql_db_query 查学校数据库，trend_analysis 看趋势，anomaly_detection 找异常，cohort_compare 做同类对比，official_policy_search 查政策库，web_search 联网检索，chart 生成结构化数据图表，plot 基于已查 rows 生成 PNG 数据图，generate_image_tool 生成图片/视觉素材，slide 生成汇报 PPT，time 解析时间口径，business_prompt_context 提供业务视角提示词板块。",
-            f"【本轮实际可用工具清单】：{available_tools_text}。",
-            "只能根据【本轮实际可用工具清单】判断工具是否可用。清单里有某个工具时，严禁说“当前环境没有该工具/该工具不可用”；如调用失败，应基于工具返回的 error 说明失败原因。清单里没有的工具不能调用，也不要假装调用过。",
-            tool_contract_prompt or "【本轮工具合同】：无强制产物；按问题需要选择工具。",
-            "系统会在用户问题前提供【当前系统参照时间】、【历史相似 SQL 案例】、【数据库表目录（无详细DDL）】和【用户原始问题】。",
-            "如果历史 SQL 与问题高度相似，优先参考它的表选择和聚合思路，但必须根据当前问题修改 WHERE 条件。",
-            "入口数据库表目录只是认路地图，不是完整字段清单；第一轮不会内联详细 DDL，不要把目录当作全量数据库上下文。",
-            "当前 DDL 是硬约束，历史 SQL 只是参考；如果历史 SQL 的表或字段不在 ddl_search/inspect_table_schema/sample_table_rows 返回内容或白名单中，必须忽略。",
-            "写 SQL 前必须确保相关表已由 ddl_search、inspect_table_schema 或 sample_table_rows 加入白名单；选定表后优先调用 inspect_table_schema 获取精确字段，再执行当前学校 schema 的只读 SELECT。",
-            "遇到 JSON/数组/枚举字段、字段格式不确定时，先调用 sample_table_rows；遇到趋势、异常、同类排名问题，先 sql_db_query 查到证据 rows，再调用 trend_analysis、anomaly_detection 或 cohort_compare 做结构化分析。",
-            "低代码 JSONB 子表准则：当 DDL 或字段样例显示明细数据存储在 JSONB/JSON 数组字段中，且用户问题涉及子表内部属性（如星期、负责人、工作内容、项目、地点、截止时间）时，禁止直接手写复杂 JSON 路径或大量 jsonb_to_recordset SQL；第一步调用 inspect_jsonb_recordset 探测内部 key 和 record_schema_suggestion，第二步调用 jsonb_recordset_query 受控打平查询。where 只引用 m. 主表字段和 s. 子表字段，例如 s.\"星期\" = '星期三'。",
-            "数据源可能存在一人/一学生/一班级多行展开。回答“有多少教师/学生/班级/人数”时，优先按稳定 ID 去重；没有 ID 时按姓名或名称去重；SQL 应尽量使用 COUNT(DISTINCT ...) 或先查明细后依据工具返回的 distinct_entity_count 作答，不能把 row_count 直接当作人数。",
-            "高效原则：优先编写能够一次性获取所需证据的复合 SQL；严禁先查一小块、再无理由抽样、再补查一小块的碎步慢查。只有字段格式不确定、JSON/数组字段、或上一次查询明确报错时，才需要 sample_table_rows。",
-            "工具额度与深度：每一个独立的业务证据方向允许最多 2 次 sql_db_query；遇到多维度概况、趋势、对比、诊断、归因或发展建议时，允许跨业务表补证。不要因为已经查到一张主事实表就急于结束；也不要无目的试探，补查必须服务于明确的证据方向。",
-            "候选表全量遍历与并行核验：ddl_search 返回的 top_k 是候选池，不是只选第一张表的排序答案。学校业务经常存在新旧表、多系统并存、因公/因私拆表、主表/明细表并行。只要候选池里出现多张与当前问题高度相关的表，且你无法百分百确定哪张才是当前在用表，必须同时或连续核验这些候选表：至少比较 count、MAX(业务时间字段/提交时间/审批时间/__instance_time) 和当前时间段命中数。对于本月、本周、本学期等当前时间统计，必须优先采用在当前时间段有活跃更新状态的表；如果一个问题同时涉及因公和因私、学生和教师、主表和明细表等并列表，必须同时查询对应表，严禁只查其中一张就交卷。",
-            "数据迁移与时间断层追查：学校业务系统经常换表、迁移或分阶段停更。如果你用当前系统参照时间在某张候选表中查询当前时间段查出为 0、空结果或明显低于预期，绝对不要直接把 0 当作业务事实交卷。必须先对该表补查一次 MAX(时间字段)，例如最新提交时间、审批时间、业务日期、开始时间或 __instance_time；如果最新时间停留在几周前、上月、去年，说明当前表是历史表或已停更旧表。此时必须重新调用 ddl_search 检索同业务方向候选表，重点查找带新系统、销假、审批、明细、汇总、v_、new、当前年份/学期等语义的表，并优先选择在当前时间段有活跃更新状态的表重新统计。",
-            "工具克制：用户没有明确要求图表、图片、PPT、联网搜索或政策依据时，默认禁止调用 chart、generate_image_tool、slide、web_search、official_policy_search，也默认禁止调用 plot；仅通过学校数据库证据和文字闭环回答。用户明确要求图片/视觉图/大屏图且本轮工具清单包含 generate_image_tool 时，应在查到必要数据后自主判断是否调用 generate_image_tool，不能把图片生成改写成纯文字方案来替代。",
-            "外部原因例外：如果用户询问病假、发热、流感、呼吸道感染等是否存在季节性或外部公共卫生原因，应先用学校数据库确认校内趋势，再调用 web_search 获取公开公共卫生或流感季节性证据；不要只凭校内 SQL 下因果结论。",
-            "动态探路：下一步查什么由你根据工具结果自主决定，禁止在没有证据时盲猜跨业务方向；每一轮只围绕当前证据最支持的下一步推进。",
-            "同一决策节点可以在同一轮并行调用多个工具：例如同时下发多个 inspect_table_schema 或 sql_db_query 获取同一业务方向的必要证据；但不要把尚未被数据支持的归因方向提前写成固定计划。",
-            "单轮多步：如果当前决策节点已经确定，且需要总量、分组、Top 项、趋势等多个口径，优先在同一条 SQL 中用 CTE、GROUP BY、窗口函数或 UNION ALL 一次取齐，避免多轮碎片化查询。",
-            "单次 sql_db_query 默认最多返回有限行数；如果工具返回 query_may_have_more=true、display_rows_has_more=true，或用户要求“完整名单/全部明细/查完”，必须继续补查：可以使用相同 WHERE 加 OFFSET 翻页，或按时间、班级、类别、教师等条件拆分，直到最后一批返回行数低于上限；最终回答要说明是否已查完整。",
-            "如果问题本质是统计/趋势/排名，优先写聚合 SQL，不要把大量明细全取出来再让模型心算；只有用户明确要明细或完整名单时才翻页补查。",
-            "只有用户明确需要画图、联网搜索、生成图片或 PPT 时，才调用对应 tool；不要把这些工具视为回答后的默认附加链路。",
-            "plot 与 generate_image_tool 的边界：plot 用于基于 sql_db_query 已查 rows 生成严谨 PNG 数据图；generate_image_tool 用于大屏视觉图、海报、宣传图、视觉素材或含设计风格的图片。plot 不执行 SQL，必须先用 sql_db_query 查到 rows，再把 rows/evidence_rows 传给 plot。",
-            "用户明确说“生成图片、画图、图表、趋势图、分布图、趋势分布图、视觉化展示、生成汇报图”时，先查询必要数据，再优先调用 generate_image_tool 生成可直接展示的图片；调用时 prompt 必须包含图表主题、真实数据、统计周期、指标、分类、关键标签和需要呈现的业务结论；prompt 中没有查到的数字、日期、百分比、峰值、环比、同比、合计、均值、排名、坐标轴刻度和汇总卡片一律不要写，禁止让生图模型自行补数字；只有用户明确要求交互式图表、可下载数据源、JSON/HTML 图表时，才调用 chart。",
-            "用户明确说“编辑图片、修改图片、改图、修图、换背景、局部修改”且提供了图片 URL、图片路径或上一轮生成图片链接时，也调用 generate_image_tool；此时必须把图片引用放到 image_url/image_path/images/image_urls/image_paths 参数中，prompt 只描述要修改的内容；如果用户要求局部编辑且提供 mask，再传 mask_url 或 mask_path。不要把图片链接只写在 prompt 文本里。",
-            "generate_image_tool 和 slide 属于重型视觉工具：同一轮回答最多各调用一次。generate_image_tool 成功后系统会直接展示图片；slide 成功后系统会展示预览/下载链接；不要重复调用；失败时说明失败原因并停止重试。",
-            "如果本轮调用了 generate_image_tool，最终回答只需说明图片已生成，不要再次手写图片链接或 Markdown 图片，系统会在工具结束事件中把图片直接展示给用户。",
-            "在形成最终回答前，如问题涉及教师发展、德育、请假健康、校级驾驶舱、政策、设施维护等学校业务场景，应调用 business_prompt_context 获取业务角色、判断视角和证据边界；它不是固定回答模板，不要被它限制格式。",
-            "图表/PPT 必须基于已查询到的 evidence rows 或政策证据生成，不能编造数据。",
-            "联网搜索和图片生成不能发送学生、教师、家长等个人敏感明细；工具会做隐私拦截，拦截时要说明原因并改用本地证据。",
-            "政策、通知和公开网页证据有强时效性；检索到多条结果时，必须优先考虑发布时间、更新时间和用户问题中的时间范围。",
-            "如果用户问“最近、近期、最新、近三年、本年度”等，必须优先选择时间更近、来源更权威、主题更贴合的结果；旧政策、旧通知、旧网页只能作为背景，不得覆盖更新证据。",
-            "当检索结果很多时，排序优先级为：官方来源 > 发布时间较新 > 与问题主题精确匹配 > 内容完整度；不要因为关键词命中就把招聘公告、无关新闻、泛泛动态混入教研、培训、课题通知回答。",
-            "如果检索结果时间跨度较大，回答中要说明最新可见证据是什么、较早证据仅作参考；如果结果没有发布时间，要标注“未提供发布时间”，不能把它当作最新依据。",
-            "职称条件/是否具备申报资格类问题，必须至少查询：教师基础档案、当前学年积分、按学年积分趋势、成果申报记录，并调用 official_policy_search 查询政策条件。",
-            "证据边界：只能把工具返回的数据和 official_policy_search 返回的政策内容当作事实；没有查到的师德考核、继续教育学分、年度考核、班主任/导师经历、一票否决项，只能写“待核实”，不能默认达标。",
-            "政策边界：政策名称、文号、年份、链接必须来自 official_policy_search 的返回内容；不能编造或沿用历史经验中的政策文号。",
-            "链接输出必须兼容 OpenWebUI：使用 Markdown 链接 `[标题](https://...)` 或列表；不要输出裸 JSON、HTML iframe、source/citation 对象。",
-            "判断口径：可以给出“已满足/基本满足/待核实/暂不能判断”，但每个判断必须说明对应证据来源；证据不足时优先保守表达。",
-            "成果/述职/评优/职称材料类问题，要输出可直接使用的材料化分析，包含代表性成果表格。",
-            "最终回答不要输出 JSON；要像 yili-ai-backend 一样给用户清晰、完整、可读的业务分析。",
-            f"当前学校：{schema_index.school_id} / {schema_index.school_name}；当前 schema：{schema_index.source_schema}。",
+            "角色：学校数据证据 Agent。",
+            f"可用工具：{available_tools_text}。",
+            "只调用可用工具；工具失败按返回 error 处理。",
+            tool_contract_prompt or "工具合同：无。",
+            "输入包含当前时间、历史 SQL、表目录和用户问题。",
+            "表目录不是字段清单；写 SQL 前用 ddl_search、inspect_table_schema 或 sample_table_rows 确认表和字段。",
+            "DDL/工具返回是硬约束；历史 SQL 只作参考。",
+            "只执行当前 schema 的只读 SELECT；不得编造表、字段、数字、名单或政策。",
+            "JSONB/数组字段先 sample_table_rows 或 inspect_jsonb_recordset；需要展开时用 jsonb_recordset_query。",
+            "计数按稳定 ID 去重；没有 ID 时按姓名或名称去重；不要把 row_count 直接当人数。",
+            "当前时间问题遇到 0/空结果时，先核验候选表 MAX 时间，再换候选表复查。",
+            "统计、趋势、排名优先聚合 SQL；明细或完整名单按 has_more/OFFSET 翻页，并把未查全写入 caveats。",
+            "只有用户明确要求时才调用联网、政策、图表、图片或 PPT 工具。",
+            "外部原因先查校内数据，再用公开证据补证；没有证据就写 caveats。",
+            f"学校：{schema_index.school_id} / {schema_index.school_name}；schema：{schema_index.source_schema}。",
     ]
     if final_handoff_enabled:
         lines.insert(
             -2,
             (
-                "最终答案交接与业务完整性审查：当你已经完成必要工具调用并准备 Finish 时，必须调用 final_answer_handoff 工具，"
-                "不要直接输出最终自然语言长答案；由该工具交给快速最终答案模型生成面向用户的回答。"
-                "调用 final_answer_handoff 前必须做一次自我质询：当前查询是否只依赖了一张孤立主事实表？"
-                "对于涉及对比、诊断、归因分析、多维度概况、发展建议的问题，严禁只查一张表就结案。"
-                "请先判断：1）现有证据是否只能回答“是什么”，不能解释“为什么”；"
-                "2）是否需要通过 ddl_search 检索并加入关联业务表白名单，例如德育/行规关联班级、值周、执勤或学生管理，"
-                "请假健康关联晨午检、学期日历或公开卫生信息，设施异常关联报修/维修/资产，教师发展关联教师档案、积分、成果和政策；"
-                "3）如果回答要呈现趋势、占比、同类排名或资格判断，是否已经查到支撑这些判断的关联维度。"
-                "如果证据链单薄，必须暂缓调用 final_answer_handoff，主动跨方向 ddl_search 并补证。"
-                "handoff_json 必须紧凑且可解析，包含 conclusion、key_facts、data_evidence、external_evidence、caveats、suggested_structure；"
-                "不要包含个人敏感明细，不要编造未查到的数据。"
+                "完成必要查询后调用 final_answer_handoff 交接 JSON；不要直接输出长答案。"
+                "JSON 优先包含 result_id、row_count、pure_business_data_markdown、source_views、caveats。"
+                "不要包含个人敏感明细。"
             ),
         )
     return "\n".join(lines)
@@ -613,6 +741,9 @@ def _split_buffered_deepseek_content(text: str, *, force: bool = False) -> dict[
 def _final_answer_marker_index(text: str) -> int:
     candidates: list[int] = []
     for pattern in [
+        r"以下是.{0,180}(?:完整汇报|情况|名单|分析|报告|结果)",
+        r"下面(?:是|给你|为你).{0,180}(?:汇报|情况|名单|分析|报告|结果)",
+        r"正式(?:回答|汇报|结论)[:：]?",
         r"\n\s*#{1,4}\s+",
         r"\n\s*---\s*\n",
         r"根据(?:学校|本次|查询|数据)",
@@ -646,6 +777,31 @@ def _looks_like_tool_planning_text(text: str) -> bool:
             "让我",
         ]
     )
+
+
+def _sanitize_final_answer(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    marker_index = _formal_final_answer_marker_index(raw)
+    if marker_index < 0:
+        marker_index = _final_answer_marker_index(raw)
+    if marker_index > 0 and _looks_like_tool_planning_text(raw[:marker_index]):
+        return raw[marker_index:].lstrip(" \n\r\t：:")
+    return raw
+
+
+def _formal_final_answer_marker_index(text: str) -> int:
+    candidates: list[int] = []
+    for pattern in [
+        r"以下是.{0,180}(?:完整汇报|情况|名单|分析|报告|结果)",
+        r"下面(?:是|给你|为你).{0,180}(?:汇报|情况|名单|分析|报告|结果)",
+        r"正式(?:回答|汇报|结论)[:：]?",
+    ]:
+        match = re.search(pattern, str(text or ""))
+        if match:
+            candidates.append(match.start())
+    return min(candidates) if candidates else -1
 
 
 def _deepseek_answer_holdback_chars() -> int:
@@ -730,6 +886,84 @@ def _loads_json_object(text: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _handoff_payload_with_tool_evidence(handoff_payload: dict[str, Any], *, tools: Any) -> dict[str, Any]:
+    payload = dict(handoff_payload or {})
+    if _first_truth_data_markdown(payload):
+        return payload
+    evidence_by_task = getattr(tools, "evidence_by_task", {}) or {}
+    if isinstance(evidence_by_task, dict) and evidence_by_task:
+        payload.setdefault("data_evidence", evidence_by_task)
+    return payload
+
+
+def _direct_snapshot_answer(*, question: str, handoff_payload: dict[str, Any]) -> str:
+    if _env_value("SCHOOL_AGENT_DIRECT_DATA_SNAPSHOT_ENABLED", default="1").lower() not in {"1", "true", "yes", "on"}:
+        return ""
+    if not _is_direct_snapshot_request(question):
+        return ""
+    return _first_truth_data_markdown(handoff_payload).strip()
+
+
+def _should_suppress_natural_answer_for_direct_snapshot(*, question: str, tools: Any) -> bool:
+    del tools
+    return _is_direct_snapshot_request(question)
+
+
+def _is_direct_snapshot_request(question: str) -> bool:
+    text = "".join(str(question or "").split())
+    if not text:
+        return False
+    direct_tokens = [
+        "只输出查询结果",
+        "只输出结果",
+        "只输出表格",
+        "只要表格",
+        "查询结果表格",
+        "不要总结",
+        "不用总结",
+        "别总结",
+        "不要分析",
+        "不用分析",
+        "直接输出数据",
+        "直接给数据",
+        "直接发数据",
+        "纯数据",
+        "原始结果",
+        "真实结果数据",
+    ]
+    if any(token in text for token in direct_tokens):
+        return True
+    return "只输出" in text and any(token in text for token in ["数据", "结果", "表格", "明细"])
+
+
+def _first_truth_data_markdown(value: Any) -> str:
+    if isinstance(value, dict):
+        markdown = value.get("truth_data_markdown")
+        if isinstance(markdown, str) and markdown.strip():
+            return markdown
+        data_evidence = value.get("data_evidence")
+        if isinstance(data_evidence, dict):
+            for nested in reversed(list(data_evidence.values())):
+                found = _first_truth_data_markdown(nested)
+                if found:
+                    return found
+        for preferred_key in ("evidence_summary", "data_evidence", "evidence_board"):
+            nested = value.get(preferred_key)
+            found = _first_truth_data_markdown(nested)
+            if found:
+                return found
+        for nested in value.values():
+            found = _first_truth_data_markdown(nested)
+            if found:
+                return found
+    if isinstance(value, list):
+        for nested in value:
+            found = _first_truth_data_markdown(nested)
+            if found:
+                return found
+    return ""
+
+
 async def _stream_fast_final_answer(
     *,
     trace: Any,
@@ -738,25 +972,56 @@ async def _stream_fast_final_answer(
     handoff_payload: dict[str, Any],
     source_views: list[str],
 ) -> AsyncIterator[str]:
+    direct_answer = _direct_snapshot_answer(question=question, handoff_payload=handoff_payload)
+    if direct_answer:
+        yield direct_answer
+        return
+
     model = agent_model_for_tool_loop(final_model)
     first_token_ms: int | None = None
     chunk_count = 0
     started = datetime.now().timestamp()
     prompt = _fast_final_answer_prompt(question=question, handoff_payload=handoff_payload, source_views=source_views)
+    system_prompt = _fast_final_answer_system_prompt()
+    handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
+    with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
+        set_step_output(
+            context_step,
+            {
+                "input": {
+                    "question": question,
+                    "source_views": source_views,
+                    "handoff_chars": len(handoff_text),
+                },
+                "decision": {
+                    "model_name": _model_name(final_model),
+                    "direct_snapshot": False,
+                    "format_policy": "free",
+                },
+                "output": {
+                    "handoff_json": trace_preview(handoff_text),
+                    "system_prompt": trace_preview(system_prompt),
+                    "final_prompt": trace_preview(prompt),
+                },
+                "error": None,
+            },
+        )
     with trace_step(
         trace,
         "agent_native.final_fast.llm",
         {
             "model_name": _model_name(final_model),
             "question": question,
-            "handoff_chars": len(json.dumps(handoff_payload, ensure_ascii=False, default=str)),
+            "handoff_chars": len(handoff_text),
             "source_views": source_views,
+            "handoff_json": trace_preview(handoff_text),
+            "final_prompt": trace_preview(prompt),
         },
     ) as step:
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         async for chunk in model.astream(
             [
-                SystemMessage(content=_fast_final_answer_system_prompt()),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=prompt),
             ]
         ):
@@ -777,6 +1042,7 @@ async def _stream_fast_final_answer(
                 "first_token_ms": first_token_ms,
                 "stream_chunk_count": chunk_count,
                 "usage": usage,
+                "final_prompt": trace_preview(prompt),
             },
         )
         if usage["total_tokens"] > 0:
@@ -812,8 +1078,8 @@ def _final_answer_handoff_tool(
     return StructuredTool.from_function(
         name="final_answer_handoff",
         description=(
-            "当你已完成必要数据查询、联网/政策检索和业务证据核验，准备给用户最终答案时调用。"
-            "不要直接输出长答案；把紧凑 JSON 字符串放入 handoff_json，网关会交给最终答案模型生成自然语言回答。"
+            "当你已完成必要数据查询、联网/政策检索和业务证据核验，准备交接证据时调用。"
+            "不要直接输出长答案；把紧凑 JSON 字符串放入 handoff_json。"
         ),
         func=_run,
     )
@@ -829,14 +1095,14 @@ def _fallback_final_handoff_payload(*, question: str, tools: Any, caveat: str = 
     evidence_by_task = getattr(tools, "evidence_by_task", {}) or {}
     return {
         "question": question,
-        "conclusion": "已完成工具证据检索，请基于 evidence_board 和 evidence_by_task 生成最终回答。",
-        "key_facts": [],
         "data_evidence": evidence_by_task,
         "evidence_board": evidence_board,
         "external_evidence": [],
+        "pure_business_data_markdown": _first_truth_data_markdown(
+            {"data_evidence": evidence_by_task, "evidence_board": evidence_board}
+        ),
         "source_views": source_views,
         "caveats": [caveat] if caveat else [],
-        "suggested_structure": ["结论", "关键数据", "主要变化/原因", "建议", "证据边界"],
     }
 
 
@@ -869,7 +1135,7 @@ async def _stream_guard_router_chat(*, trace: Any = None, model: Any, question: 
     if str(conversation_context or "").strip():
         user_prompt = f"【最近对话上下文】\n{conversation_context[:4000]}\n\n【用户问题】\n{question}"
     messages = [
-        SystemMessage(content="你是亲切、专业的校园智能助手。直接回答，不要提工具、数据库、SQL或内部思考。"),
+        SystemMessage(content="直接回答用户问题。不要提工具、数据库、SQL或内部思考。"),
         HumanMessage(content=user_prompt),
     ]
     first_token_ms: int | None = None
@@ -908,26 +1174,56 @@ def _run_fast_final_answer_sync(
     handoff_payload: dict[str, Any],
     source_views: list[str],
 ) -> str:
+    direct_answer = _direct_snapshot_answer(question=question, handoff_payload=handoff_payload)
+    if direct_answer:
+        return direct_answer
+
     model = agent_model_for_tool_loop(final_model)
     first_token_ms: int | None = None
     chunk_count = 0
     started = datetime.now().timestamp()
     answer_parts: list[str] = []
     prompt = _fast_final_answer_prompt(question=question, handoff_payload=handoff_payload, source_views=source_views)
+    system_prompt = _fast_final_answer_system_prompt()
+    handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
+    with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
+        set_step_output(
+            context_step,
+            {
+                "input": {
+                    "question": question,
+                    "source_views": source_views,
+                    "handoff_chars": len(handoff_text),
+                },
+                "decision": {
+                    "model_name": _model_name(final_model),
+                    "direct_snapshot": False,
+                    "format_policy": "free",
+                },
+                "output": {
+                    "handoff_json": trace_preview(handoff_text),
+                    "system_prompt": trace_preview(system_prompt),
+                    "final_prompt": trace_preview(prompt),
+                },
+                "error": None,
+            },
+        )
     with trace_step(
         trace,
         "agent_native.final_fast.llm",
         {
             "model_name": _model_name(final_model),
             "question": question,
-            "handoff_chars": len(json.dumps(handoff_payload, ensure_ascii=False, default=str)),
+            "handoff_chars": len(handoff_text),
             "source_views": source_views,
+            "handoff_json": trace_preview(handoff_text),
+            "final_prompt": trace_preview(prompt),
         },
     ) as step:
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         for chunk in model.stream(
             [
-                SystemMessage(content=_fast_final_answer_system_prompt()),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=prompt),
             ]
         ):
@@ -948,6 +1244,7 @@ def _run_fast_final_answer_sync(
                 "first_token_ms": first_token_ms,
                 "stream_chunk_count": chunk_count,
                 "usage": usage,
+                "final_prompt": trace_preview(prompt),
             },
         )
         if usage["total_tokens"] > 0:
@@ -957,13 +1254,10 @@ def _run_fast_final_answer_sync(
 
 def _fast_final_answer_system_prompt() -> str:
     return (
-        "你是亲切、活泼且专业的学校智能问答助手，也就是 ReporterAgent。"
-        "DataAgent 已经完成查表、查政策、联网或工具分析；你只负责把 handoff JSON 里的证据写成给用户看的最终回答。"
-        "只能基于用户问题和 handoff JSON 中的证据作答，不得新增未提供的数据、链接、政策或校内事实。"
-        "禁止输出数据库字段名、表名、SQL、工具名、JSON、内部推理过程或“我先查询/我需要查看”等过程性话术。"
-        "回答要恢复 yili-ai-backend 那种校内业务分析风格：结论先行、数据支撑充分、Markdown 分段清楚、必要时用表格。"
-        "语气要像一位懂学校业务的助手在认真汇报：温暖、清楚、有一点灵动感，可以自然使用少量 Emoji 或颜文字增强可读性，但不要卖萌过度。"
-        "不要机械套模板，但默认要让用户一眼看出：总体判断、关键数据、结构/趋势/异常、建议和证据边界。"
+        "你根据客观证据包回答学校数据问题。"
+        "所有数字、名单、判断、政策与来源必须来自证据，不得新增未提供的事实。"
+        "禁止向用户泄露 SQL、数据表名、工具名、Handoff JSON、内部节点名或“我先查询/我需要查看”等过程性话术。"
+        "在不改变事实的前提下，可以自由组织最终呈现方式。"
     )
 
 
@@ -975,13 +1269,9 @@ def _fast_final_answer_prompt(*, question: str, handoff_payload: dict[str, Any],
     )
     return "\n".join(
         [
-            f"用户问题：{question}",
-            f"已使用数据表/视图：{', '.join(source_views) if source_views else '未记录'}",
-            "业务回答风格提示：",
+            "客观证据包：",
             style_guide,
-            "handoff JSON：",
-            json.dumps(handoff_payload, ensure_ascii=False, default=str, indent=2),
-            "请以学校智能问答助手的亲切、专业、可读口吻生成最终中文回答。不要输出 JSON。不要说“根据校医院反馈”等未提供来源。",
+            "基于证据回答用户问题。呈现方式自由；不要泄露内部结构，不要复述工具过程，不要说“根据校医院反馈”等未提供来源。",
         ]
     )
 
@@ -991,32 +1281,34 @@ def _fast_final_answer_style_guide(*, question: str, handoff_payload: dict[str, 
     views = " ".join(str(item or "") for item in source_views)
     payload_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
     combined = f"{q} {views} {payload_text}"
-    lines = [
-        "1. 先用1段给出简短结论，直接回答用户问的是什么；可以用一句轻量、自然的开场，但不要空泛寒暄。",
-        "2. 如果有总量、占比、排名、环比、趋势或分布，优先用 Markdown 表格或清晰项目符号呈现，不要压成一整段。",
-        "3. 如果问题是概况/总体情况/趋势/对比，回答应包含：总体判断、关键指标、结构或变化解读、需要关注的点、下一步建议。",
-        "4. 如果证据不完整，最后用一句话说明统计口径或边界；不要把样本、LIMIT 或阶段性数据说成全量。",
-        "5. 可自然使用少量 Emoji 作为段落提示或重点标识，但不要为了活泼牺牲事实严谨性。",
-    ]
+    evidence_matrix: dict[str, Any] = {
+        "user_original_question": q,
+        "source_views": list(source_views or []),
+        "handoff_evidence": handoff_payload,
+    }
+    evidence_notes: list[str] = []
     if any(token in combined for token in ["德育", "行规", "扣分", "纪律"]):
-        lines.append(
-            "业务补充：德育/行规类要像德育处简报：说明扣分总量、类别结构、集中班级/年级、高频事项和治理建议；注意不要混淆检查方和值周方。"
-        )
+        evidence_notes.append("德育/行规边界：注意区分检查方、值周方、扣分类别、班级/年级和时间窗口。")
     if any(token in combined for token in ["请假", "病假", "事假", "返校", "晨午检"]):
-        lines.append(
-            "业务补充：请假/健康类要像校务健康态势简报：说明规模、日度波动、类型结构、年级/班级集中度和需要跟进的对象或风险；涉及疾病原因要保守表达。"
+        evidence_notes.append(
+            "请假/健康边界：涉及疾病原因要保守处理，只能使用证据中出现的请假类型、时间、对象和风险线索。"
+        )
+        evidence_notes.append(
+            "未提供课表、代课安排、考勤签到或全员在岗证据时，不得判断课程已安排代课，不得判断教学秩序正常，不得判断无需调代课，不得判断其余教师均正常在岗；只能说“是否需要调代课需结合课表/代课安排进一步确认”。"
         )
     if any(token in combined for token in ["教师", "积分", "成果", "申报", "职称", "荣誉", "述职", "评优"]):
-        lines.append(
-            "业务补充：教师发展类要像教师发展中心材料：先概括总量和定位，再按指标/成果层级/级别/等第/积分贡献分层，必要时列代表性成果表格；政策不足时写待核验。"
-        )
+        evidence_notes.append("教师发展边界：积分、成果、级别、等第、主办单位和政策条件只能按证据判断；政策不足时写待核验。")
     if any(token in combined for token in ["政策", "官网", "通知", "链接", "引用来源"]):
-        lines.append(
-            "业务补充：政策或联网证据必须使用证据中的来源；正文句末可用 [1]、[2] 编号引用，不要手写网址清单，OpenWebUI 会展示原生引用来源。"
-        )
+        evidence_notes.append("政策或联网证据必须使用证据中的来源；不要编造政策名称、年份、文号或链接。")
     if any(token in combined for token in ["图表", "图片", "PPT", "汇报图"]):
-        lines.append("业务补充：视觉工具成功时，只需简要说明生成内容和读图要点，不要重复输出内部 artifact JSON。")
-    return "\n".join(lines)
+        evidence_notes.append("视觉工具证据只作为已生成资产或读图证据；不要重复输出内部 artifact JSON。")
+    if evidence_notes:
+        evidence_matrix["evidence_boundary_notes"] = evidence_notes
+    return (
+        "========================================================\n"
+        f"{json.dumps(evidence_matrix, ensure_ascii=False, default=str, indent=2)}\n"
+        "========================================================"
+    )
 
 
 def _chunk_text(chunk: Any) -> str:

@@ -16,6 +16,7 @@ from gateway_core.conversation.manager import ChatCompletionRequest
 from gateway_core.runtime.admin.endpoints import (
     route_export_daily_merged_monitor,
     route_health,
+    route_langfuse_status,
     route_list_models,
     route_school_trace_detail,
     route_school_trace_dashboard_html,
@@ -114,6 +115,12 @@ def token_usage(
 def token_usage_dashboard() -> str:
     """Token 消耗可视化页面。"""
     return route_token_usage_dashboard_html()
+
+
+@app.get("/v1/admin/langfuse/status")
+def langfuse_status_endpoint(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    """返回 Langfuse 控制台接入状态。"""
+    return route_langfuse_status(authorization)
 
 
 @app.get("/v1/admin/school-traces/{trace_id}")

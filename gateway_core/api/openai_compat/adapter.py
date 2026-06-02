@@ -5,6 +5,7 @@ import time
 from typing import Any, AsyncIterator
 
 from gateway_core.agents.universal_hub.models import SkillEvent
+from gateway_core.api.openai_compat.stream_policy import route_text_visibility
 from gateway_core.prompts import prompt_domains
 
 
@@ -76,10 +77,16 @@ def _openai_chunks_for_event(
     completion_id: str,
     stream_tool_events: bool,
 ) -> tuple[str, ...]:
-    if event.event_type == "process":
-        return _text_delta_chunks(_event_text(event.data), "reasoning_content", model_id, completion_id)
-    if event.event_type == "content":
-        return _text_delta_chunks(_event_text(event.data), "content", model_id, completion_id)
+    current_node = _event_langgraph_node(event)
+
+    text_field = route_text_visibility(
+        event.event_type,
+        current_node=current_node,
+        stream_tool_events=stream_tool_events,
+    )
+    if text_field:
+        text = _tool_event_text(event) if event.event_type in {"tool_start", "tool_end"} else _event_text(event.data)
+        return _text_delta_chunks(text, text_field, model_id, completion_id)
     if event.event_type == "artifact":
         return _text_delta_chunks(_rendered_artifact_markdown(event.data), "content", model_id, completion_id)
     if event.event_type == "evidence":
@@ -89,9 +96,22 @@ def _openai_chunks_for_event(
             *_text_delta_chunks(_evidence_completed_markdown(event.data), "content", model_id, completion_id),
             *_sources_delta_chunks(_evidence_completed_sources(event.data), model_id, completion_id),
         )
-    if event.event_type in {"tool_start", "tool_end"} and stream_tool_events:
-        return _text_delta_chunks(_tool_event_text(event), "reasoning_content", model_id, completion_id)
     return ()
+
+
+def _event_langgraph_node(event: SkillEvent) -> str:
+    metadata = getattr(event, "metadata", None)
+    if isinstance(metadata, dict):
+        node = metadata.get("langgraph_node")
+        if node:
+            return str(node)
+    if isinstance(event.data, dict):
+        data_metadata = event.data.get("metadata")
+        if isinstance(data_metadata, dict):
+            node = data_metadata.get("langgraph_node")
+            if node:
+                return str(node)
+    return ""
 
 
 def _text_delta_chunks(text: str, field: str, model_id: str, completion_id: str) -> tuple[str, ...]:

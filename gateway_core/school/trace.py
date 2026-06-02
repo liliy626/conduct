@@ -52,6 +52,35 @@ def include_rows() -> bool:
     return _truthy_env("SCHOOL_TRACE_INCLUDE_ROWS", "TENANT_TRACE_INCLUDE_ROWS", "0")
 
 
+def debug_trace_enabled() -> bool:
+    return _truthy_env("GATEWAY_DEBUG_TRACE", "SCHOOL_DEBUG_TRACE", "0") or _truthy_env(
+        "SCHOOL_TRACE_DEBUG", "TENANT_TRACE_DEBUG", "0"
+    )
+
+
+def trace_preview(value: Any, *, max_chars: int | None = None) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(value)
+    limit = max_chars if max_chars is not None else trace_preview_chars()
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return f"{text[:limit]}...<truncated {len(text) - limit} chars>"
+
+
+def trace_preview_chars() -> int:
+    default = "12000" if debug_trace_enabled() else "2000"
+    raw = _env_value("GATEWAY_TRACE_PREVIEW_CHARS", "SCHOOL_TRACE_PREVIEW_CHARS", default)
+    try:
+        return max(200, min(int(raw), 50000))
+    except Exception:
+        return int(default)
+
+
 def max_rows() -> int:
     raw = _env_value("SCHOOL_TRACE_MAX_ROWS", "TENANT_TRACE_MAX_ROWS", "20")
     try:
@@ -107,6 +136,12 @@ def finish_trace(trace: SchoolTrace | None) -> None:
     while len(_TRACE_STORE) > limit:
         _TRACE_STORE.popitem(last=False)
     _append_trace_log(trace)
+    try:
+        from gateway_core.observability.langfuse_exporter import export_school_trace_to_langfuse
+
+        export_school_trace_to_langfuse(trace)
+    except Exception:
+        pass
 
 
 def get_trace(trace_id: str, school_id: str | None = None, tenant_id: str | None = None) -> dict[str, Any] | None:
@@ -420,6 +455,22 @@ def _sanitize_nested(key: str, value: Any) -> Any:
         return "<hidden>"
     if key in {"input_preview", "output_preview"} and not include_sql() and _contains_sql(value):
         return "<hidden>"
+    if key in {
+        "columns",
+        "fields",
+        "field_labels",
+        "source_views",
+        "referenced_views",
+        "dataset_id",
+        "dataset_label",
+        "source_view",
+        "source_field",
+        "field_id",
+        "label",
+        "table_name",
+        "schema_name",
+    }:
+        return value
     if key in {"rows", "raw_rows"}:
         if not include_rows():
             return "<hidden>"

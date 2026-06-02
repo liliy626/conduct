@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
+from langchain_core.messages import AnyMessage
 from langgraph.graph import MessagesState
+from langgraph.graph.message import add_messages
 
 
 @dataclass(frozen=True)

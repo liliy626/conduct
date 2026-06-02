@@ -45,6 +45,7 @@ from gateway_core.api.openai_compat.agent_native_flow import (
 from gateway_core.api.openai_compat.chat_pipeline_parts import request_parts, response_parts
 from gateway_core.api.openai_compat.pipeline_response_tools import build_pipeline_response_tools
 from gateway_core.api.openai_compat.pipeline_setup_flow import prepare_pipeline_setup
+from gateway_core.api.openai_compat.pipeline_audit import trace_pipeline_audit
 from gateway_core.api.openai_compat.policy_evidence_search import build_policy_evidence_search
 from gateway_core.prompts import prompt_domains
 from gateway_core.prompts.prompt_registry import (
@@ -146,6 +147,7 @@ async def _collect_stream_text_and_usage(
     )
 
 
+@trace_pipeline_audit(route_name="chat_completions")
 async def run_chat_completions(
     request,
     req: ChatCompletionRequest,
@@ -651,7 +653,7 @@ async def _stream_canonical_plan_cache(
         sources = result.get("sources") if isinstance(result.get("sources"), list) else []
         if text:
             async for chunk in UniversalHubStreamAdapter.to_openai_sse(
-                _single_skill_event(SkillEvent(event_type="content", data={"text": text})),
+                _single_skill_event(_final_answer_event(text)),
                 model_id=setup.spec.model_id,
                 completion_id=setup.completion_id,
                 stream_tool_events=False,
@@ -749,7 +751,7 @@ async def _stream_canonical_plan_cache_then_hub(
         sources = result.get("sources") if isinstance(result.get("sources"), list) else []
         if text:
             async for chunk in UniversalHubStreamAdapter.to_openai_sse(
-                _single_skill_event(SkillEvent(event_type="content", data={"text": text})),
+                _single_skill_event(_final_answer_event(text)),
                 model_id=setup.spec.model_id,
                 completion_id=setup.completion_id,
                 stream_tool_events=False,
@@ -1014,7 +1016,7 @@ async def _stream_experimental_shadow_hub(
                     content_buffer_chars = 0
                     if buffered_text:
                         async for chunk in UniversalHubStreamAdapter.to_openai_sse(
-                            _single_skill_event(SkillEvent(event_type="content", data={"text": buffered_text})),
+                            _single_skill_event(_final_answer_event(buffered_text)),
                             model_id=setup.spec.model_id,
                             completion_id=setup.completion_id,
                             stream_tool_events=False,
@@ -1042,7 +1044,7 @@ async def _stream_experimental_shadow_hub(
         text = _experimental_shadow_final_text(final_state)
         if text and not content_emitted and not suppress_final_text:
             async for chunk in UniversalHubStreamAdapter.to_openai_sse(
-                _single_skill_event(SkillEvent(event_type="content", data={"text": text})),
+                _single_skill_event(_final_answer_event(text)),
                 model_id=setup.spec.model_id,
                 completion_id=setup.completion_id,
                 stream_tool_events=False,
@@ -1058,7 +1060,7 @@ async def _stream_experimental_shadow_hub(
             )
             if buffered_text:
                 async for chunk in UniversalHubStreamAdapter.to_openai_sse(
-                    _single_skill_event(SkillEvent(event_type="content", data={"text": buffered_text})),
+                    _single_skill_event(_final_answer_event(buffered_text)),
                     model_id=setup.spec.model_id,
                     completion_id=setup.completion_id,
                     stream_tool_events=False,
@@ -1118,6 +1120,14 @@ async def _stream_experimental_shadow_hub(
 
 async def _single_skill_event(event: SkillEvent):
     yield event
+
+
+def _final_answer_event(text: str) -> SkillEvent:
+    return SkillEvent(
+        event_type="content",
+        data={"text": text},
+        metadata={"langgraph_node": "final_answer"},
+    )
 
 
 def _skill_event_from_custom_graph_event(event: dict[str, Any]) -> SkillEvent | None:

@@ -60,7 +60,7 @@ from gateway_core.agents.school_sql.sql_utils import (
     truncate_text as _truncate_text,
     quote_ident as _quote_ident,
 )
-from gateway_core.school.trace import set_step_output, trace_step
+from gateway_core.school.trace import include_sql, set_step_output, trace_preview, trace_step
 
 
 class DDLReactTools:
@@ -596,7 +596,7 @@ class DDLReactTools:
                     "allowed": True,
                     "sql": guardrail.sql,
                     "row_count": len(rows),
-                    "columns": list(rows[0].keys()) if rows else [],
+                    "columns": list(formatted_rows[0].keys()) if formatted_rows else [],
                     "raw_rows": formatted_rows,
                     "evidence_summary": evidence_summary,
                     "referenced_views": guardrail.referenced_views,
@@ -734,9 +734,18 @@ class DDLReactTools:
                 payload = {
                     "source": "school_schema",
                     "allowed": False,
-                "error": "ddl_search_required_before_sql_db_query",
+                    "error": "ddl_search_required_before_sql_db_query",
                 }
                 set_step_output(step, payload)
+                self._record_sql_execution_trace(
+                    task_id=task_id,
+                    sql=canonical_sql,
+                    referenced_views=[],
+                    allowed=False,
+                    decision={"reason": payload["error"]},
+                    output={},
+                    error=payload["error"],
+                )
                 return json.dumps(payload, ensure_ascii=False, default=str)
             guardrail = validate_raw_sql(
                 self.package_index,
@@ -754,6 +763,15 @@ class DDLReactTools:
                     "blocked_tokens": guardrail.blocked_tokens,
                 }
                 set_step_output(step, payload)
+                self._record_sql_execution_trace(
+                    task_id=task_id,
+                    sql=guardrail.sql,
+                    referenced_views=guardrail.referenced_views,
+                    allowed=False,
+                    decision={"reason": guardrail.reason, "blocked_tokens": guardrail.blocked_tokens},
+                    output={},
+                    error=guardrail.reason,
+                )
                 return json.dumps(payload, ensure_ascii=False, default=str)
             if _requires_json_sample_before_aggregate(guardrail.sql) and not self._has_json_sample_for_refs(
                 guardrail.referenced_views
@@ -772,6 +790,15 @@ class DDLReactTools:
                     "sample_sql_hint": _json_sample_sql_hint(guardrail.sql),
                 }
                 set_step_output(step, payload)
+                self._record_sql_execution_trace(
+                    task_id=task_id,
+                    sql=guardrail.sql,
+                    referenced_views=guardrail.referenced_views,
+                    allowed=False,
+                    decision={"reason": payload["error"], "requires_sample": True},
+                    output={"sample_sql_hint": payload["sample_sql_hint"]},
+                    error=payload["error"],
+                )
                 return json.dumps(payload, ensure_ascii=False, default=str)
             try:
                 rows = _execute_query(psycopg_module=self.psycopg_module, dsn=self.dsn, sql=guardrail.sql, params=[])
@@ -785,6 +812,15 @@ class DDLReactTools:
                     "limit_applied": guardrail.limit_applied,
                 }
                 set_step_output(step, payload)
+                self._record_sql_execution_trace(
+                    task_id=task_id,
+                    sql=guardrail.sql,
+                    referenced_views=guardrail.referenced_views,
+                    allowed=False,
+                    decision={"reason": "execute_query_error", "limit_applied": guardrail.limit_applied},
+                    output={},
+                    error=str(exc),
+                )
                 return json.dumps(payload, ensure_ascii=False, default=str)
             if self.sql_logger is not None:
                 self.sql_logger(
@@ -982,6 +1018,43 @@ class DDLReactTools:
                     "experience_recorded": experience_recorded,
                 },
             )
+            with trace_step(
+                self.trace,
+                "sql_execution",
+                {
+                    "task_id": task_id,
+                    "question": self.question,
+                    "referenced_views": guardrail.referenced_views,
+                },
+            ) as sql_step:
+                sql_output: dict[str, Any] = {
+                    "input": {
+                        "question": self.question,
+                        "sql": guardrail.sql if include_sql() else "<hidden>",
+                        "canonical_sql": canonical_sql if include_sql() else "<hidden>",
+                        "referenced_views": guardrail.referenced_views,
+                    },
+                    "decision": {
+                        "allowed": True,
+                        "limit_applied": guardrail.limit_applied,
+                        "effective_limit": effective_limit,
+                        "query_may_have_more": query_may_have_more,
+                        "expanded_to_full_rows": expanded_to_full_rows,
+                    },
+                    "output": {
+                        "task_id": task_id,
+                        "row_count": len(rows),
+                        "total_row_count": total_row_count,
+                        "columns": list(formatted_rows[0].keys()) if formatted_rows else [],
+                        "field_labels": field_labels,
+                        "row_sample": formatted_rows[:5],
+                        "evidence_summary": evidence_summary,
+                        "truth_data_markdown": trace_preview(evidence_summary.get("truth_data_markdown", "")),
+                        "evidence_board": board_snapshot,
+                    },
+                    "error": None,
+                }
+                set_step_output(sql_step, sql_output)
         return json.dumps(payload, ensure_ascii=False, default=str)
 
     def suggest_related_queries(self, query: str = "") -> str:
@@ -1264,6 +1337,40 @@ class DDLReactTools:
             board = self.evidence_board_payload()
             set_step_output(step, {"task_id": task_id, "evidence_board": board})
             return board
+
+    def _record_sql_execution_trace(
+        self,
+        *,
+        task_id: str,
+        sql: str,
+        referenced_views: list[str],
+        allowed: bool,
+        decision: dict[str, Any],
+        output: dict[str, Any],
+        error: str | None,
+    ) -> None:
+        with trace_step(
+            self.trace,
+            "sql_execution",
+            {
+                "task_id": task_id,
+                "question": self.question,
+                "referenced_views": referenced_views,
+            },
+        ) as step:
+            set_step_output(
+                step,
+                {
+                    "input": {
+                        "question": self.question,
+                        "sql": sql if include_sql() else "<hidden>",
+                        "referenced_views": referenced_views,
+                    },
+                    "decision": {"allowed": allowed, **decision},
+                    "output": output,
+                    "error": error,
+                },
+            )
 
     def _selected_dataset_payloads(self, refs: list[str]) -> list[dict[str, str]]:
         out: list[dict[str, str]] = []
