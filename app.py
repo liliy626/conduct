@@ -28,6 +28,10 @@ from gateway_core.runtime.admin.endpoints import (
 )
 from gateway_core.api.openai_compat.chat_pipeline import run_chat_completions
 from gateway_core.agents.jobs.endpoints import router as agent_jobs_router
+from gateway_core.dashboard.component_query import (
+    DashboardComponentQueryRequest,
+    route_dashboard_component_query,
+)
 from gateway_core.tools.artifact_endpoints import router as artifact_router
 from gateway_core.tools.time_endpoints import router as time_tools_router
 
@@ -130,6 +134,12 @@ def school_trace_detail(
 ) -> Dict[str, Any]:
     """读取单次 school schema 数据流 trace 明细。"""
     return route_school_trace_detail(authorization=authorization, trace_id=trace_id)
+
+
+@app.post("/v1/dashboard/component-query")
+def dashboard_component_query(req: DashboardComponentQueryRequest) -> Dict[str, Any]:
+    """按大屏组件查询 SQL 与样本数据。"""
+    return route_dashboard_component_query(req)
 
 
 @app.post("/v1/chat/completions", response_model=None)

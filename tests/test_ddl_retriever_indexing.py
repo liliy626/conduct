@@ -257,6 +257,73 @@ def test_ddl_search_returns_candidate_evidence_packets_from_metadata(monkeypatch
     assert payload["sql_ready_risk"]["low"] == 1
 
 
+def test_ddl_search_reuses_same_turn_near_duplicate_query(monkeypatch) -> None:
+    from gateway_core.agents.school_sql.sql_tools import DDLReactTools
+    import gateway_core.agents.school_sql.sql_tools as sql_tools
+    from gateway_core.schema_context.ddl_retriever import RetrievedDDLContext, RetrievedDDLDocument
+
+    tool = DDLReactTools.__new__(DDLReactTools)
+    tool.question = "学校师资团队怎么样？"
+    tool.tenant_id = "sch_zx_mlh"
+    tool.package_index = SimpleNamespace(source_schema="zx_mlh")
+    tool.dsn = "postgres://fake"
+    tool.psycopg_module = object()
+    tool.embedding_fn = lambda text: [0.1, 0.2]
+    tool.trace = None
+    tool.allowed_table_refs = []
+    tool.ddl_contexts = []
+    tool._last_evidence_packets_by_ref = {}
+    tool._last_ddl_sql_ready_refs = set()
+    tool._post_ddl_inspect_refs = set()
+    tool._post_ddl_sample_refs = set()
+    tool._last_ddl_search_finished_perf = 0.0
+    tool._known_columns_by_ref = {}
+
+    calls = {"retrieve": 0, "probe": 0}
+
+    def fake_retrieve(**_kwargs):
+        calls["retrieve"] += 1
+        return RetrievedDDLContext(
+            ddl='Table: "zx_mlh"."人事档案_人员信息"',
+            source="schema_ddl_vector",
+            schema_name="zx_mlh",
+            table_refs=["zx_mlh.人事档案_人员信息"],
+            documents=[
+                RetrievedDDLDocument(
+                    table_name="人事档案_人员信息",
+                    business_description="教师人员信息",
+                    ddl_context='CREATE TABLE "人事档案_人员信息" ("姓名" text, "职称" text, "学历" text)',
+                    metadata={
+                        "freshness_status": "active",
+                        "recommended_time_field": "__instance_time",
+                        "sql_ready": True,
+                        "sql_ready_risk": "low",
+                        "latest_row_preview": {"姓名": "张老师", "职称": "一级教师"},
+                    },
+                )
+            ],
+            timings_ms={"embedding_ms": 1.0, "vector_sql_ms": 1.0, "keyword_sql_ms": 1.0, "merge_ms": 1.0},
+        )
+
+    def fake_probe(refs, query):
+        calls["probe"] += 1
+        return [{"table_ref": refs[0], "status": "active", "time_field": "__instance_time"}]
+
+    monkeypatch.setattr(sql_tools, "_ddl_top_k", lambda: 12)
+    monkeypatch.setattr(sql_tools, "_ddl_max_chars_per_doc", lambda: 2200)
+    monkeypatch.setattr(sql_tools, "_ddl_vector_table", lambda: "ddl_vector_documents")
+    monkeypatch.setattr(sql_tools, "retrieve_lean_ddl_context", fake_retrieve)
+    tool._probe_candidate_evidence_map = fake_probe
+
+    first = json.loads(tool.ddl_search("人事档案_人员信息 教师 职称 学历 学科 编制 性别 年龄"))
+    second = json.loads(tool.ddl_search("师资 教师总数 职称 学科分布 人事档案"))
+
+    assert first["from_turn_cache"] is False
+    assert second["from_turn_cache"] is True
+    assert second["table_refs"] == ["zx_mlh.人事档案_人员信息"]
+    assert calls == {"retrieve": 1, "probe": 1}
+
+
 def test_ddl_to_sql_observation_marks_direct_sql_after_ready_ddl() -> None:
     from gateway_core.agents.school_sql.sql_tools import DDLReactTools
 
@@ -279,3 +346,69 @@ def test_ddl_to_sql_observation_marks_direct_sql_after_ready_ddl() -> None:
     assert observation["direct_sql_after_ddl_search"] is True
     assert observation["inspect_skipped_by_sql_ready"] is True
     assert observation["sql_ready_risk"] == {"zx_mlh.每日执勤_行政执勤记录表": "low"}
+
+
+def test_sql_db_query_blocks_columns_missing_from_ddl_evidence(monkeypatch) -> None:
+    from gateway_core.agents.school_sql.sql_tools import DDLReactTools
+    import gateway_core.agents.school_sql.sql_tools as sql_tools
+
+    tool = DDLReactTools.__new__(DDLReactTools)
+    tool.question = "学校的整体教师画像"
+    tool.tenant_id = "sch_zx_mlh"
+    tool.package_index = SimpleNamespace(
+        source_schema="zx_mlh",
+        datasets=[
+            SimpleNamespace(
+                source_schema="zx_mlh",
+                source_view="教师获奖_获奖上报",
+                sensitive_fields=[],
+            )
+        ],
+    )
+    tool.dsn = "postgres://fake"
+    tool.psycopg_module = object()
+    tool.embedding_fn = None
+    tool.trace = None
+    tool.sql_logger = None
+    tool.evidence_by_task = {}
+    tool.allowed_table_refs = ["zx_mlh.教师获奖_获奖上报"]
+    tool.ddl_contexts = []
+    tool.json_sampled_refs = set()
+    tool._last_ddl_search_finished_perf = time.perf_counter() - 0.05
+    tool._last_ddl_sql_ready_refs = {"zx_mlh.教师获奖_获奖上报"}
+    tool._post_ddl_inspect_refs = set()
+    tool._post_ddl_sample_refs = set()
+    tool._last_evidence_packets_by_ref = {
+        "zx_mlh.教师获奖_获奖上报": {
+            "table_ref": "zx_mlh.教师获奖_获奖上报",
+            "sql_ready": True,
+            "sql_ready_risk": "low",
+            "latest_row_preview": {
+                "获奖级别": "区级",
+                "申报类型": "教师个人获奖",
+                "获奖教师": "张三",
+            },
+        }
+    }
+    tool._known_columns_by_ref = {
+        "zx_mlh.教师获奖_获奖上报": {"获奖级别", "申报类型", "获奖教师"}
+    }
+    tool._sql_query_counter = 0
+    tool._sql_query_counter_lock = threading.Lock()
+
+    def fail_execute(**_kwargs):
+        raise AssertionError("SQL with a missing evidence column should be blocked before DB execution")
+
+    monkeypatch.setattr(sql_tools, "_execute_query", fail_execute)
+
+    payload = json.loads(
+        tool.sql_db_query(
+            'SELECT "获奖级别", COUNT(DISTINCT "审批编号") AS "获奖记录总数" '
+            'FROM "zx_mlh"."教师获奖_获奖上报" GROUP BY "获奖级别"'
+        )
+    )
+
+    assert payload["allowed"] is False
+    assert payload["error"] == "ddl_field_not_in_evidence"
+    assert payload["missing_columns_by_table"] == {"zx_mlh.教师获奖_获奖上报": ["审批编号"]}
+    assert "inspect_table_schema" in payload["message"]

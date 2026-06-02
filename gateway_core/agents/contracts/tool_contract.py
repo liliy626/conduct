@@ -24,6 +24,7 @@ class ToolContract:
     required_outputs: set[str] = field(default_factory=set)
     allowed_tools: set[str] = field(default_factory=set)
     answer_mode: str = "data"
+    answer_focus: str = ""
     reason: str = ""
     completed_outputs: set[str] = field(default_factory=set)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
@@ -41,6 +42,10 @@ class ToolContract:
         artifacts = payload.get("artifacts")
         if isinstance(artifacts, list):
             self.artifacts.extend([item for item in artifacts if isinstance(item, dict)])
+        if tool_name == "official_policy_search" and _tool_result_attempt_completed(payload):
+            self.completed_outputs.add("policy_evidence")
+        if tool_name == "web_search" and _tool_result_attempt_completed(payload):
+            self.completed_outputs.add("web_evidence")
         if tool_name == "generate_image_tool" and _has_artifact(payload, "image"):
             self.completed_outputs.add("image_artifact")
         if tool_name == "chart" and _has_artifact(payload, "chart"):
@@ -66,6 +71,8 @@ class ToolContract:
     def prompt_text(self) -> str:
         lines = ["【本轮工具合同】："]
         lines.append(f"- 回答模式：{self.answer_mode or 'data'}")
+        if self.answer_focus:
+            lines.append(f"- 回答焦点：{self.answer_focus}")
         if self.reason:
             lines.append(f"- 规划理由：{self.reason}")
         lines.append(f"- 允许的非 SQL 可选工具：{', '.join(sorted(self.allowed_tools)) if self.allowed_tools else '无'}")
@@ -80,6 +87,7 @@ class ToolContract:
             "required_outputs": sorted(self.required_outputs),
             "allowed_tools": sorted(self.allowed_tools),
             "answer_mode": self.answer_mode,
+            "answer_focus": self.answer_focus,
             "reason": self.reason,
             "completed_outputs": sorted(self.completed_outputs),
             "artifact_count": len(self.artifacts),
@@ -94,6 +102,7 @@ def build_tool_contract(question: str, *, plan: PerTurnContractPlan | None = Non
         required_outputs=set(str(item or "").strip() for item in plan.required_outputs if str(item or "").strip()),
         allowed_tools=set(str(item or "").strip() for item in plan.allowed_tools if str(item or "").strip()),
         answer_mode=str(plan.answer_mode or "data"),
+        answer_focus=str(getattr(plan, "answer_focus", "") or "").strip(),
         reason=str(plan.reason or "").strip(),
     )
 
@@ -103,6 +112,14 @@ def _has_artifact(payload: dict[str, Any], artifact_type: str) -> bool:
     if not isinstance(artifacts, list):
         return False
     return any(isinstance(item, dict) and item.get("type") == artifact_type for item in artifacts)
+
+
+def _tool_result_attempt_completed(payload: dict[str, Any]) -> bool:
+    if payload.get("ok") is True:
+        return True
+    if payload.get("error"):
+        return False
+    return any(isinstance(payload.get(key), list) for key in ("sources", "evidence", "artifacts"))
 
 
 def _missing_message(missing: list[str]) -> str:

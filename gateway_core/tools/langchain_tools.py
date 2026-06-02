@@ -89,7 +89,7 @@ def _default_tool_policy() -> set[str]:
 
 
 def _tool_policy_for_contract(tool_contract: Any) -> set[str]:
-    names = {"time", "business_prompt_context"}
+    names = {"time"}
     allowed_tools = getattr(tool_contract, "allowed_tools", set()) or set()
     names.update(str(item or "").strip() for item in allowed_tools if str(item or "").strip())
     required_outputs = getattr(tool_contract, "required_outputs", set()) or set()

@@ -19,6 +19,7 @@ def build_school_schema_index(
     schema_name: str,
     dsn: str,
     psycopg_module: Any,
+    load_fields: bool = True,
 ) -> SchoolSchemaIndex:
     """Build the Agent schema index directly from PostgreSQL metadata.
 
@@ -33,7 +34,7 @@ def build_school_schema_index(
     if not str(dsn or "").strip() or psycopg_module is None:
         raise ValueError("database dsn and psycopg_module are required for schema-only school index")
 
-    cache_key = f"{clean_school}:{clean_schema}:{_max_tables()}:{_max_fields_per_table()}"
+    cache_key = f"{clean_school}:{clean_schema}:{_max_tables()}:{_max_fields_per_table()}:{int(bool(load_fields))}"
     if _cache_enabled():
         hit = _SCHEMA_INDEX_CACHE.get(cache_key)
         if hit is not None and isinstance(hit.value, SchoolSchemaIndex):
@@ -43,6 +44,7 @@ def build_school_schema_index(
         schema_name=clean_schema,
         dsn=dsn,
         psycopg_module=psycopg_module,
+        load_fields=load_fields,
     )
     index = SchoolSchemaIndex(
         school_id=clean_school,
@@ -59,17 +61,23 @@ def clear_schema_index_cache() -> None:
     _SCHEMA_INDEX_CACHE.clear()
 
 
-def _load_schema_datasets(*, schema_name: str, dsn: str, psycopg_module: Any) -> list[SchoolDatasetIndex]:
+def _load_schema_datasets(
+    *,
+    schema_name: str,
+    dsn: str,
+    psycopg_module: Any,
+    load_fields: bool = True,
+) -> list[SchoolDatasetIndex]:
     with connect_db(psycopg_module, dsn) as conn:
         with conn.cursor() as cur:
             cur.execute("SET statement_timeout = 5000", [])
-            vector_datasets = _load_ddl_vector_datasets(cur, schema_name=schema_name)
+            vector_datasets = _load_ddl_vector_datasets(cur, schema_name=schema_name, load_fields=load_fields)
             if vector_datasets:
                 return vector_datasets
-            return _load_information_schema_datasets(cur, schema_name=schema_name)
+            return _load_information_schema_datasets(cur, schema_name=schema_name, load_fields=load_fields)
 
 
-def _load_ddl_vector_datasets(cur: Any, *, schema_name: str) -> list[SchoolDatasetIndex]:
+def _load_ddl_vector_datasets(cur: Any, *, schema_name: str, load_fields: bool = True) -> list[SchoolDatasetIndex]:
     vector_table = _clean_identifier(os.getenv("SCHOOL_DDL_VECTOR_TABLE") or os.getenv("TENANT_DDL_VECTOR_TABLE") or "ddl_vector_documents")
     if not vector_table:
         return []
@@ -105,10 +113,14 @@ def _load_ddl_vector_datasets(cur: Any, *, schema_name: str) -> list[SchoolDatas
             metadata=metadata,
         )
         candidates.append((table_name, str(object_type_raw or "TABLE"), description, metadata, str(content_raw or "")))
-    fields_by_table = _load_fields_many(
-        cur,
-        schema_name=schema_name,
-        table_names=[item[0] for item in candidates],
+    fields_by_table = (
+        _load_fields_many(
+            cur,
+            schema_name=schema_name,
+            table_names=[item[0] for item in candidates],
+        )
+        if load_fields
+        else {}
     )
     for table_name, object_type, description, _metadata, _content in candidates:
         datasets.append(
@@ -119,12 +131,13 @@ def _load_ddl_vector_datasets(cur: Any, *, schema_name: str) -> list[SchoolDatas
                 comment=description,
                 fields=fields_by_table.get(table_name, []),
                 raw_source="ddl_vector_documents",
+                field_load_mode="loaded" if load_fields else "skipped",
             )
         )
     return datasets
 
 
-def _load_information_schema_datasets(cur: Any, *, schema_name: str) -> list[SchoolDatasetIndex]:
+def _load_information_schema_datasets(cur: Any, *, schema_name: str, load_fields: bool = True) -> list[SchoolDatasetIndex]:
     cur.execute(
         """
         SELECT t.table_name, t.table_type,
@@ -150,10 +163,14 @@ def _load_information_schema_datasets(cur: Any, *, schema_name: str) -> list[Sch
         if not table_name or _is_metadata_table(table_name):
             continue
         candidates.append((table_name, str(table_type_raw or ""), str(comment_raw or "")))
-    fields_by_table = _load_fields_many(
-        cur,
-        schema_name=schema_name,
-        table_names=[item[0] for item in candidates],
+    fields_by_table = (
+        _load_fields_many(
+            cur,
+            schema_name=schema_name,
+            table_names=[item[0] for item in candidates],
+        )
+        if load_fields
+        else {}
     )
     for table_name, table_type, comment in candidates:
         datasets.append(
@@ -164,6 +181,7 @@ def _load_information_schema_datasets(cur: Any, *, schema_name: str) -> list[Sch
                 comment=comment,
                 fields=fields_by_table.get(table_name, []),
                 raw_source="information_schema",
+                field_load_mode="loaded" if load_fields else "skipped",
             )
         )
     return datasets
@@ -237,6 +255,7 @@ def _dataset_from_table(
     comment: str,
     fields: list[SchoolFieldIndex],
     raw_source: str = "information_schema",
+    field_load_mode: str = "loaded",
 ) -> SchoolDatasetIndex:
     dataset_id = _dataset_id(table_name)
     time_fields = [field.field_id for field in fields if field.role == "date"]
@@ -265,7 +284,7 @@ def _dataset_from_table(
         metric_fields=metric_fields,
         status_fields=status_fields,
         sensitive_fields=sensitive_fields,
-        raw={"source": raw_source, "table_type": table_type},
+        raw={"source": raw_source, "table_type": table_type, "field_load_mode": field_load_mode},
     )
 
 

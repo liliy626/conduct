@@ -12,7 +12,6 @@ _DISPLAY_NAMES = {
     "school_trace": "学校数据流观测",
     "school.resolve": "学校身份解析",
     "school_schema.index": "学校数据表索引",
-    "agent_native.guard_router.llm": "智能体路由判断",
     "route_result": "路由结果",
     "domain_context": "业务上下文证据",
     "metadata_selection": "元数据目录快照",

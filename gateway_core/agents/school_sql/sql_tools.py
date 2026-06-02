@@ -107,6 +107,8 @@ class DDLReactTools:
         self._post_ddl_inspect_refs: set[str] = set()
         self._post_ddl_sample_refs: set[str] = set()
         self._last_evidence_packets_by_ref: dict[str, dict[str, Any]] = {}
+        self._ddl_search_turn_cache: list[dict[str, Any]] = []
+        self._known_columns_by_ref: dict[str, set[str]] = {}
         self._sql_query_counter = 0
         self._sql_query_counter_lock = threading.Lock()
         self.evidence_board = EvidenceBoard(
@@ -134,6 +136,7 @@ class DDLReactTools:
                     "当 ddl_search 返回的 evidence packet 显示 sql_ready=true 且 sql_ready_risk=low，"
                     "并且问题可由单表明确字段回答时，优先直接 sql_db_query；只有字段含义、JSONB/数组展开、"
                     "关联关系或时间口径不明确时再调用本工具。"
+                    "若准备使用的字段没有出现在 ddl_search evidence 或已 inspect 的字段清单中，必须先调用本工具确认。"
                     "输入表名，可以是 表名 或 schema.表名。"
                 ),
                 func=self.inspect_table_schema,
@@ -175,6 +178,7 @@ class DDLReactTools:
                     "sql_ready、sql_ready_risk 和 fallback 建议。写 SQL 前必须先调用。"
                     "如果候选表 sql_ready=true、sql_ready_risk=low，且用户问题可由明确单表字段回答，"
                     "优先直接用 recommended_time_field 生成 SQL 并调用 sql_db_query；"
+                    "生成 SQL 时必须严格使用该表 evidence/DDL 中出现过的字段名，不能把其他表字段迁移过来；"
                     "只有字段含义、JSONB/数组展开、多表关联或时间口径不明确时再 inspect/sample。"
                     "输入是自然语言检索词。"
                 ),
@@ -190,6 +194,8 @@ class DDLReactTools:
                 description=(
                     "执行一条 PostgreSQL SELECT。输入是 SQL 字符串。"
                     "只能查询 ddl_search 本轮返回过的当前学校 schema 表；禁止写操作、多语句、系统 schema 和裸表名。"
+                    "SQL 引用的字段必须来自 ddl_search evidence/DDL 或 inspect_table_schema 返回的该表字段清单；"
+                    "字段没有证据时先 inspect_table_schema 修正。"
                 ),
                 func=self.sql_db_query,
             ),
@@ -298,6 +304,10 @@ class DDLReactTools:
                     }
                 else:
                     self._remember_table_ref(f"{table_ref[0]}.{table_ref[1]}")
+                    self._remember_known_columns(
+                        f"{table_ref[0]}.{table_ref[1]}",
+                        [str(column.get("column_name") or "") for column in columns],
+                    )
                     payload = {
                         "source": "information_schema",
                         "allowed": True,
@@ -637,6 +647,38 @@ class DDLReactTools:
                 "vector_table": _ddl_vector_table(),
             },
         ) as step:
+            cached_payload = self._ddl_search_turn_cache_lookup(clean_query)
+            if cached_payload is not None:
+                payload = dict(cached_payload)
+                payload["query"] = clean_query
+                payload["from_turn_cache"] = True
+                payload["turn_cache_reason"] = "same_turn_near_duplicate_ddl_query"
+                payload["timings_ms"] = {
+                    **(payload.get("timings_ms") if isinstance(payload.get("timings_ms"), dict) else {}),
+                    "turn_cache_ms": 0.0,
+                }
+                set_step_output(
+                    step,
+                    {
+                        "doc_count": payload.get("doc_count", 0),
+                        "table_refs": payload.get("table_refs", []),
+                        "ddl_chars": len(str(payload.get("ddl") or payload.get("ddl_preview") or "")),
+                        "from_cache": payload.get("from_cache", False),
+                        "from_turn_cache": True,
+                        "turn_cache_reason": payload["turn_cache_reason"],
+                        "error": payload.get("error", ""),
+                        "documents": payload.get("documents", []),
+                        "candidate_evidence_map": payload.get("candidate_evidence_map", []),
+                        "candidate_evidence_packets": payload.get("candidate_evidence_packets", []),
+                        "sql_ready_count": payload.get("sql_ready_count", 0),
+                        "sql_ready_risk": payload.get("sql_ready_risk", {}),
+                        "timings_ms": payload.get("timings_ms", {}),
+                        "recall_compare": payload.get("recall_compare", {}),
+                    },
+                )
+                self._last_ddl_search_finished_perf = time.perf_counter()
+                return json.dumps(payload, ensure_ascii=False, default=str)
+
             result = retrieve_lean_ddl_context(
                 question=clean_query,
                 schema_name=self.package_index.source_schema,
@@ -660,6 +702,16 @@ class DDLReactTools:
                 for item in evidence_packets
                 if str(item.get("table_ref") or "").strip()
             }
+            for document in result.documents:
+                self._remember_known_columns(
+                    f"{self.package_index.source_schema}.{document.table_name}",
+                    _column_names_from_ddl_text(document.ddl_context),
+                )
+            for packet in evidence_packets:
+                self._remember_known_columns(
+                    str(packet.get("table_ref") or ""),
+                    _column_names_from_evidence_packet(packet),
+                )
             self._last_ddl_sql_ready_refs = {
                 _normalize_ref(str(item.get("table_ref") or ""))
                 for item in evidence_packets
@@ -685,6 +737,7 @@ class DDLReactTools:
                 "timings_ms": timings_ms,
                 "recall_compare": result.recall_compare,
                 "from_cache": result.from_cache,
+                "from_turn_cache": False,
                 "error": result.error,
                 "documents": [
                     {
@@ -728,7 +781,25 @@ class DDLReactTools:
                 },
             )
             self._last_ddl_search_finished_perf = time.perf_counter()
+            self._ddl_search_turn_cache_store(clean_query, payload)
         return json.dumps(payload, ensure_ascii=False, default=str)
+
+    def _ddl_search_turn_cache_lookup(self, query: str) -> dict[str, Any] | None:
+        for item in reversed(getattr(self, "_ddl_search_turn_cache", []) or []):
+            cached_query = str(item.get("query") or "")
+            cached_payload = item.get("payload")
+            if not isinstance(cached_payload, dict):
+                continue
+            if _same_turn_ddl_query_reusable(cached_query, query):
+                return cached_payload
+        return None
+
+    def _ddl_search_turn_cache_store(self, query: str, payload: dict[str, Any]) -> None:
+        if not hasattr(self, "_ddl_search_turn_cache"):
+            self._ddl_search_turn_cache = []
+        self._ddl_search_turn_cache.append({"query": str(query or ""), "payload": dict(payload)})
+        if len(self._ddl_search_turn_cache) > 8:
+            self._ddl_search_turn_cache = self._ddl_search_turn_cache[-8:]
 
     def sql_experience_search(self, query: str) -> str:
         clean_query = str(query or "").strip() or self.question
@@ -841,6 +912,26 @@ class DDLReactTools:
                     error=guardrail.reason,
                 )
                 return json.dumps(payload, ensure_ascii=False, default=str)
+            field_guard_payload = self._field_evidence_guard_payload(
+                sql=guardrail.sql,
+                referenced_views=guardrail.referenced_views,
+                ddl_to_sql_observation=ddl_to_sql_observation,
+            )
+            if field_guard_payload:
+                set_step_output(step, field_guard_payload)
+                self._record_sql_execution_trace(
+                    task_id=task_id,
+                    sql=guardrail.sql,
+                    referenced_views=guardrail.referenced_views,
+                    allowed=False,
+                    decision={
+                        "reason": field_guard_payload["error"],
+                        "missing_columns_by_table": field_guard_payload["missing_columns_by_table"],
+                    },
+                    output={"known_columns_by_table": field_guard_payload.get("known_columns_by_table", {})},
+                    error=field_guard_payload["error"],
+                )
+                return json.dumps(field_guard_payload, ensure_ascii=False, default=str)
             if _requires_json_sample_before_aggregate(guardrail.sql) and not self._has_json_sample_for_refs(
                 guardrail.referenced_views
             ):
@@ -1320,6 +1411,87 @@ class DDLReactTools:
         clean = str(ref or "").strip()
         if clean and clean not in self.allowed_table_refs:
             self.allowed_table_refs.append(clean)
+
+    def _remember_known_columns(self, ref: str, columns: list[str] | set[str]) -> None:
+        normalized = _normalize_ref(str(ref or ""))
+        if not normalized:
+            return
+        if not hasattr(self, "_known_columns_by_ref"):
+            self._known_columns_by_ref = {}
+        bucket = self._known_columns_by_ref.setdefault(normalized, set())
+        for column in columns or []:
+            clean = str(column or "").strip()
+            if clean:
+                bucket.add(clean)
+
+    def _known_columns_for_ref(self, ref: str) -> set[str]:
+        normalized_refs = _normalized_ref_set([ref], schema_name=self.package_index.source_schema)
+        known_by_ref = getattr(self, "_known_columns_by_ref", {})
+        columns: set[str] = set()
+        for normalized in normalized_refs:
+            columns.update(known_by_ref.get(normalized, set()))
+        return columns
+
+    def _field_evidence_guard_payload(
+        self,
+        *,
+        sql: str,
+        referenced_views: list[str],
+        ddl_to_sql_observation: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        identifiers = _quoted_column_identifiers_for_evidence_check(sql, referenced_views=referenced_views)
+        if not identifiers:
+            return None
+        if len(referenced_views) == 1:
+            table_ref = _canonical_ref_for_payload(referenced_views[0], schema_name=self.package_index.source_schema)
+            known_columns = self._known_columns_for_ref(referenced_views[0])
+            if not known_columns:
+                return None
+            missing = _missing_identifiers(identifiers, known_columns)
+            if not missing:
+                return None
+            return {
+                "source": "school_schema",
+                "allowed": False,
+                "error": "ddl_field_not_in_evidence",
+                "message": (
+                    "SQL 引用了当前 DDL/evidence 中未出现的字段。请先调用 inspect_table_schema "
+                    "确认该表字段清单，然后只使用返回的精确字段名重写 SQL；不要把其他表的字段迁移到本表。"
+                ),
+                "sql": sql,
+                "referenced_views": referenced_views,
+                "missing_columns_by_table": {table_ref: missing},
+                "known_columns_by_table": {table_ref: sorted(known_columns)[:80]},
+                **ddl_to_sql_observation,
+            }
+
+        known_union: set[str] = set()
+        known_by_table: dict[str, list[str]] = {}
+        for ref in referenced_views:
+            table_ref = _canonical_ref_for_payload(ref, schema_name=self.package_index.source_schema)
+            known = self._known_columns_for_ref(ref)
+            if known:
+                known_union.update(known)
+                known_by_table[table_ref] = sorted(known)[:80]
+        if not known_union:
+            return None
+        missing = _missing_identifiers(identifiers, known_union)
+        if not missing:
+            return None
+        return {
+            "source": "school_schema",
+            "allowed": False,
+            "error": "ddl_field_not_in_evidence",
+            "message": (
+                "SQL 引用了当前 DDL/evidence 中未出现的字段。多表 SQL 请先 inspect_table_schema "
+                "确认每张表字段，并用表别名限定字段来源后重写。"
+            ),
+            "sql": sql,
+            "referenced_views": referenced_views,
+            "missing_columns_by_table": {"multiple_tables": missing},
+            "known_columns_by_table": known_by_table,
+            **ddl_to_sql_observation,
+        }
 
     def _ddl_to_sql_observation(self, referenced_views: list[str]) -> dict[str, Any]:
         refs = _normalized_ref_set(referenced_views, schema_name=self.package_index.source_schema)
@@ -1904,6 +2076,83 @@ def _normalized_ref_set(refs: list[str], *, schema_name: str) -> set[str]:
         if "." not in clean:
             out.add(_normalize_ref(f"{schema_name}.{clean}"))
     return out
+
+
+def _canonical_ref_for_payload(ref: str, *, schema_name: str) -> str:
+    clean = str(ref or "").strip()
+    if not clean:
+        return ""
+    if "." in clean:
+        return ".".join(part.strip('"') for part in clean.split(".") if part)
+    table_name = clean.strip('"')
+    return f"{schema_name}.{table_name}"
+
+
+def _column_names_from_evidence_packet(packet: dict[str, Any]) -> list[str]:
+    latest_row = packet.get("latest_row_preview") if isinstance(packet, dict) else None
+    if not isinstance(latest_row, dict):
+        return []
+    return [str(key or "").strip() for key in latest_row.keys() if str(key or "").strip()]
+
+
+def _column_names_from_ddl_text(text: str) -> list[str]:
+    clean = str(text or "")
+    out: list[str] = []
+    patterns = [
+        r'(?m)^\s*-\s+"((?:[^"]|"")*)"\s*\(',
+        r'(?m)^\s*"((?:[^"]|"")*)"\s+',
+        r'(?m)^\s*`([^`]+)`\s+',
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, clean):
+            column = match.group(1).replace('""', '"').strip()
+            if column and column not in out:
+                out.append(column)
+    return out
+
+
+def _quoted_column_identifiers_for_evidence_check(sql: str, *, referenced_views: list[str]) -> list[str]:
+    identifiers = extract_column_refs(sql)
+    if not identifiers:
+        return []
+    excluded = _quoted_aliases(sql)
+    for ref in referenced_views or []:
+        for part in str(ref or "").split("."):
+            clean = part.strip().strip('"')
+            if clean:
+                excluded.add(clean)
+    out: list[str] = []
+    for identifier in identifiers:
+        clean = str(identifier or "").strip()
+        if not clean or clean in excluded:
+            continue
+        if clean not in out:
+            out.append(clean)
+    return out
+
+
+def _quoted_aliases(sql: str) -> set[str]:
+    aliases: set[str] = set()
+    for match in re.finditer(r'(?is)\bas\s+"((?:[^"]|"")*)"', str(sql or "")):
+        alias = match.group(1).replace('""', '"').strip()
+        if alias:
+            aliases.add(alias)
+    return aliases
+
+
+def _missing_identifiers(identifiers: list[str], known_columns: set[str]) -> list[str]:
+    known_exact = {str(item or "").strip() for item in known_columns if str(item or "").strip()}
+    known_lower = {item.lower() for item in known_exact}
+    missing: list[str] = []
+    for identifier in identifiers:
+        clean = str(identifier or "").strip()
+        if not clean:
+            continue
+        if clean in known_exact or clean.lower() in known_lower:
+            continue
+        if clean not in missing:
+            missing.append(clean)
+    return missing
 
 
 def _ddl_search_returns_full_ddl() -> bool:
@@ -2544,3 +2793,35 @@ def _jsonb_recordset_where_error(where: str) -> str:
     if any(alias not in {"m", "s"} for alias in refs):
         return "where_may_only_reference_m_or_s"
     return ""
+
+
+def _same_turn_ddl_query_reusable(previous: str, current: str) -> bool:
+    prev_tokens = _ddl_query_cache_tokens(previous)
+    curr_tokens = _ddl_query_cache_tokens(current)
+    if not prev_tokens or not curr_tokens:
+        return False
+    overlap = prev_tokens & curr_tokens
+    if len(overlap) >= 2:
+        return True
+    long_overlap = {token for token in overlap if len(token) >= 4}
+    if long_overlap:
+        return True
+    return False
+
+
+def _ddl_query_cache_tokens(value: str) -> set[str]:
+    text = str(value or "").strip()
+    if not text:
+        return set()
+    rough = re.split(r"[\s,，、;；:：/\\|]+", text)
+    tokens: set[str] = set()
+    for item in rough:
+        clean = item.strip().strip("\"'()（）[]【】")
+        if not clean:
+            continue
+        tokens.add(clean)
+        for part in re.split(r"[_]+", clean):
+            part = part.strip()
+            if part:
+                tokens.add(part)
+    return {token for token in tokens if len(token) >= 2}

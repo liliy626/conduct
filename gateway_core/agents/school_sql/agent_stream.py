@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import asyncio
 from datetime import datetime
 from typing import Any, AsyncIterator, Callable
 
@@ -20,10 +19,13 @@ from gateway_core.agents.streaming.langgraph_event_stream import (
 )
 from gateway_core.agents.contracts import ContractPlanner, build_tool_contract
 from gateway_core.tools.langchain_tools import build_langchain_agent_tools
+from gateway_core.tools.business_prompt_tool import BusinessPromptContextTool
+from gateway_core.tools.tool_core import AgentToolInput, ToolExecutionContext
 from gateway_core.conversation.threading import build_langgraph_thread_id
 from gateway_core.agents.school_sql.agent_model import agent_model_for_tool_loop
 from gateway_core.schema_context.ddl_embedding import ddl_embed_text
 from gateway_core.agents.school_sql.sql_tools import DDLReactTools
+from gateway_core.agents.school_sql.sql_utils import ddl_top_k, ddl_vector_table
 from gateway_core.infra.api_keys import current_api_key_record, is_school_record
 from gateway_core.runtime.runtime_trace_context import _add_trace_usage
 from gateway_core.school.schema_indexer import build_school_schema_index
@@ -96,31 +98,6 @@ async def stream_school_sql_agent_native(
                 },
             )
 
-        is_chat_route = await _is_guard_router_chat(trace=trace, model=model, question=question)
-        with trace_step(trace, "route_result", {"question": question}) as step:
-            set_step_output(
-                step,
-                {
-                    "decision": "chat" if is_chat_route else "data",
-                    "route": "guard_router" if is_chat_route else "school_sql_agent",
-                    "input": {"question": question, "conversation_context_chars": len(str(conversation_context or ""))},
-                    "output": {"uses_database_agent": not is_chat_route},
-                    "error": None,
-                },
-            )
-        if is_chat_route:
-            final_answer_source = "guard_router"
-            async for chunk in _stream_guard_router_chat(
-                trace=trace,
-                model=model,
-                question=question,
-                conversation_context=conversation_context,
-            ):
-                yield _content_event(chunk)
-            _record_final_answer()
-            finish_trace(trace)
-            return
-
         schema_index = _build_agent_schema_index(
             trace=trace,
             school_id=school_id,
@@ -173,14 +150,54 @@ async def stream_school_sql_agent_native(
                     },
                     "error": None,
                 },
-            )
+        )
         final_handoff_enabled = _final_handoff_enabled(final_model)
         direct_snapshot_mode = _is_direct_snapshot_request(question)
+        business_prompt_context = _contract_business_prompt_context(question=question, school_id=school_id)
+        ddl_vector_context = _ddl_vector_context(schema_index)
         contract_plan = _plan_tool_contract(
             trace=trace,
             model=agent_model_for_tool_loop(model),
             question=question,
             conversation_context=conversation_context,
+            metadata_catalog_context=ddl_context,
+            ddl_vector_context=ddl_vector_context,
+            business_prompt_context=business_prompt_context,
+            sql_experience_context=sql_experience,
+        )
+        is_chat_route = str(getattr(contract_plan, "route", "data") or "data").strip().lower() == "chat"
+        with trace_step(trace, "route_result", {"question": question}) as step:
+            set_step_output(
+                step,
+                {
+                    "decision": "chat" if is_chat_route else "data",
+                    "route": "contract_plan" if is_chat_route else "school_sql_agent",
+                    "input": {
+                        "question": question,
+                        "conversation_context_chars": len(str(conversation_context or "")),
+                        "contract_plan_route": getattr(contract_plan, "route", "data"),
+                    },
+                    "output": {"uses_database_agent": not is_chat_route},
+                    "error": None,
+                },
+            )
+        if is_chat_route:
+            final_answer_source = "contract_plan_chat"
+            async for chunk in _stream_contract_plan_chat(
+                trace=trace,
+                model=model,
+                question=question,
+                conversation_context=conversation_context,
+            ):
+                yield _content_event(chunk)
+            _record_final_answer()
+            finish_trace(trace)
+            return
+        prefetched_ddl_context = _prefetch_startup_ddl_context(
+            trace=trace,
+            tools=tools,
+            question=question,
+            answer_focus=str(getattr(contract_plan, "answer_focus", "") or ""),
         )
         tool_contract = build_tool_contract(question, plan=contract_plan)
         tool_list = [
@@ -246,6 +263,7 @@ async def stream_school_sql_agent_native(
                 {
                     "history_sql_context_chars": len(sql_experience),
                     "ddl_context_chars": len(ddl_context),
+                    "prefetched_ddl_context_chars": len(prefetched_ddl_context),
                     "tool_count": len(tool_list),
                     "available_tools": [str(getattr(tool, "name", "") or "") for tool in tool_list],
                     "tool_contract": tool_contract.trace_payload(),
@@ -257,6 +275,7 @@ async def stream_school_sql_agent_native(
             sql_experience=sql_experience,
             ddl_context=ddl_context,
             conversation_context=conversation_context,
+            prefetched_ddl_context=prefetched_ddl_context,
         )
         latest_messages: list[Any] = []
         citation_sources: list[dict[str, Any]] = []
@@ -302,6 +321,7 @@ async def stream_school_sql_agent_native(
                     question=question,
                     handoff_payload=handoff_payload,
                     source_views=tools.source_views,
+                    business_prompt_context=business_prompt_context,
                 ):
                     yield _content_event(chunk)
                 final_handoff_done = True
@@ -355,6 +375,7 @@ async def stream_school_sql_agent_native(
                             question=question,
                             handoff_payload=handoff_payload,
                             source_views=tools.source_views,
+                            business_prompt_context=business_prompt_context,
                         ):
                             yield _content_event(chunk)
                     elif buffered_text:
@@ -396,6 +417,7 @@ async def stream_school_sql_agent_native(
                 question=question,
                 handoff_payload=handoff_payload,
                 source_views=tools.source_views,
+                business_prompt_context=business_prompt_context,
             ):
                 yield _content_event(chunk)
         if direct_snapshot_mode and not final_handoff_enabled:
@@ -442,7 +464,17 @@ async def stream_school_sql_agent_native(
         finish_trace(trace)
 
 
-def _plan_tool_contract(*, trace: Any, model: Any, question: str, conversation_context: str) -> Any:
+def _plan_tool_contract(
+    *,
+    trace: Any,
+    model: Any,
+    question: str,
+    conversation_context: str,
+    metadata_catalog_context: str = "",
+    ddl_vector_context: str = "",
+    business_prompt_context: str = "",
+    sql_experience_context: str = "",
+) -> Any:
     available_tools = _contract_available_tools()
     with trace_step(
         trace,
@@ -455,6 +487,10 @@ def _plan_tool_contract(*, trace: Any, model: Any, question: str, conversation_c
         plan = ContractPlanner(model).plan_turn(
             question=question,
             conversation_context=conversation_context,
+            metadata_catalog_context=metadata_catalog_context,
+            ddl_vector_context=ddl_vector_context,
+            business_prompt_context=business_prompt_context,
+            sql_experience_context=sql_experience_context,
             available_tools=available_tools,
         )
         set_step_output(
@@ -463,20 +499,35 @@ def _plan_tool_contract(*, trace: Any, model: Any, question: str, conversation_c
                 "input": {
                     "question": question,
                     "conversation_context_preview": trace_preview(conversation_context),
+                    "metadata_catalog_preview": trace_preview(metadata_catalog_context),
+                    "ddl_vector_preview": trace_preview(ddl_vector_context),
+                    "business_prompt_preview": trace_preview(business_prompt_context),
+                    "sql_experience_preview": trace_preview(sql_experience_context),
                     "available_tools": available_tools,
                 },
+                "input_chars": {
+                    "conversation_context": len(str(conversation_context or "")),
+                    "metadata_catalog": len(str(metadata_catalog_context or "")),
+                    "ddl_vector": len(str(ddl_vector_context or "")),
+                    "business_prompt": len(str(business_prompt_context or "")),
+                    "sql_experience": len(str(sql_experience_context or "")),
+                },
                 "decision": {
+                    "route": getattr(plan, "route", "data"),
                     "required_outputs": list(plan.required_outputs),
                     "allowed_tools": list(plan.allowed_tools),
                     "answer_mode": plan.answer_mode,
+                    "answer_focus": getattr(plan, "answer_focus", ""),
                 },
                 "output": {
                     "reason": plan.reason,
                 },
                 "error": None,
+                "route": getattr(plan, "route", "data"),
                 "required_outputs": list(plan.required_outputs),
                 "allowed_tools": list(plan.allowed_tools),
                 "answer_mode": plan.answer_mode,
+                "answer_focus": getattr(plan, "answer_focus", ""),
                 "reason": plan.reason,
             },
         )
@@ -487,12 +538,18 @@ def _plan_tool_contract(*, trace: Any, model: Any, question: str, conversation_c
                     "input": {
                         "question": question,
                         "conversation_context_preview": trace_preview(conversation_context),
+                        "metadata_catalog_preview": trace_preview(metadata_catalog_context),
+                        "ddl_vector_preview": trace_preview(ddl_vector_context),
+                        "business_prompt_preview": trace_preview(business_prompt_context),
+                        "sql_experience_preview": trace_preview(sql_experience_context),
                         "available_tools": available_tools,
                     },
                     "decision": {
+                        "route": getattr(plan, "route", "data"),
                         "required_outputs": list(plan.required_outputs),
                         "allowed_tools": list(plan.allowed_tools),
                         "answer_mode": plan.answer_mode,
+                        "answer_focus": getattr(plan, "answer_focus", ""),
                         "reason": plan.reason,
                     },
                     "output": {"tool_contract_seed": plan.trace_payload() if hasattr(plan, "trace_payload") else {}},
@@ -513,6 +570,145 @@ def _contract_available_tools() -> list[str]:
         "generate_image_tool",
         "slide",
     ]
+
+
+def _ddl_vector_context(schema_index: Any) -> str:
+    schema_name = str(getattr(schema_index, "source_schema", "") or "").strip()
+    return (
+        f"schema={schema_name or 'unknown'}; "
+        f"vector_table={ddl_vector_table()}; "
+        f"top_k={ddl_top_k()}; "
+        "retriever=ddl_search/retrieve_lean_ddl_context"
+    )
+
+
+def _contract_business_prompt_context(*, question: str, school_id: str = "") -> str:
+    try:
+        output = BusinessPromptContextTool().run(
+            AgentToolInput(arguments={"question": question}),
+            ToolExecutionContext(tenant_id=school_id, metadata={"layer": "contract_planner"}),
+        )
+        payload = output.to_dict()
+    except Exception as exc:
+        payload = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _prefetch_startup_ddl_context(*, trace: Any, tools: Any, question: str, answer_focus: str = "") -> str:
+    if _env_value("SCHOOL_AGENT_STARTUP_DDL_PREFETCH_ENABLED", "TENANT_AGENT_STARTUP_DDL_PREFETCH_ENABLED", "1").lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return ""
+    queries = _startup_ddl_prefetch_queries(question=question, answer_focus=answer_focus)
+    if not queries:
+        return ""
+    summaries: list[str] = []
+    with trace_step(
+        trace,
+        "agent_native.ddl_prefetch",
+        {"question": question, "answer_focus": answer_focus, "query_count": len(queries)},
+    ) as step:
+        outputs: list[dict[str, Any]] = []
+        for query in queries:
+            try:
+                raw = tools.ddl_search(query)
+                payload = _loads_json_object(raw)
+            except Exception as exc:
+                payload = {"query": query, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+            summary = _startup_ddl_prefetch_summary(query=query, payload=payload)
+            if summary:
+                summaries.append(summary)
+            outputs.append(
+                {
+                    "query": query,
+                    "doc_count": payload.get("doc_count") if isinstance(payload, dict) else None,
+                    "table_refs": (payload.get("table_refs") or [])[:8] if isinstance(payload, dict) else [],
+                    "error": payload.get("error", "") if isinstance(payload, dict) else "invalid_payload",
+                }
+            )
+        context = "\n\n".join(summaries).strip()
+        set_step_output(
+            step,
+            {
+                "input": {"question": question, "answer_focus": answer_focus, "queries": queries},
+                "decision": {"prefetch_enabled": True, "query_count": len(queries)},
+                "output": {
+                    "queries": outputs,
+                    "context_chars": len(context),
+                    "context_preview": trace_preview(context),
+                },
+                "error": None,
+            },
+        )
+        return context
+
+
+def _startup_ddl_prefetch_queries(*, question: str, answer_focus: str = "") -> list[str]:
+    text = f"{question} {answer_focus}"
+    if not text.strip():
+        return []
+    if "教师" not in text:
+        return []
+    profile_tokens = ["画像", "整体", "全貌", "概况", "分布", "教师队伍"]
+    if not any(token in text for token in profile_tokens):
+        return []
+    return [
+        "人事档案_人员信息 教师 职称 学历 学科 编制 性别 年龄",
+    ]
+
+
+def _startup_ddl_prefetch_summary(*, query: str, payload: dict[str, Any]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    packets = payload.get("candidate_evidence_packets")
+    if not isinstance(packets, list):
+        packets = []
+    lines = [f"预取查询：{query}"]
+    if payload.get("error"):
+        lines.append(f"错误：{payload.get('error')}")
+    shown = 0
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        table_ref = str(packet.get("table_ref") or "").strip()
+        if not table_ref:
+            continue
+        latest_row = packet.get("latest_row_preview") if isinstance(packet.get("latest_row_preview"), dict) else {}
+        latest_fields = list(latest_row.keys())[:12]
+        lines.append(
+            "- "
+            f"{table_ref}; "
+            f"freshness={packet.get('freshness_status') or 'unknown'}; "
+            f"recommended_time_field={packet.get('recommended_time_field') or ''}; "
+            f"sql_ready={bool(packet.get('sql_ready'))}; "
+            f"risk={packet.get('sql_ready_risk') or ''}; "
+            f"latest_fields={latest_fields}"
+        )
+        shown += 1
+        if shown >= _startup_prefetch_tables_per_query():
+            break
+    if shown == 0:
+        table_refs = payload.get("table_refs") if isinstance(payload.get("table_refs"), list) else []
+        if table_refs:
+            lines.append("候选表：" + "、".join(str(item) for item in table_refs[:_startup_prefetch_tables_per_query()]))
+    return "\n".join(lines).strip()
+
+
+def _startup_prefetch_tables_per_query() -> int:
+    try:
+        return max(1, min(int(_env_value("SCHOOL_AGENT_STARTUP_DDL_PREFETCH_TABLES_PER_QUERY", default="4") or "4"), 8))
+    except Exception:
+        return 4
+
+
+def _startup_prefetch_context_max_chars() -> int:
+    try:
+        return max(1000, min(int(_env_value("SCHOOL_AGENT_STARTUP_DDL_PREFETCH_MAX_CHARS", default="9000") or "9000"), 24000))
+    except Exception:
+        return 9000
 
 
 def agent_native_enabled_for_token(token: str | None) -> bool:
@@ -548,6 +744,7 @@ def _build_agent_schema_index(
             schema_name=schema_name,
             dsn=dsn,
             psycopg_module=psycopg_module,
+            load_fields=_agent_schema_index_load_fields(),
         )
         set_step_output(step, _index_trace_payload(schema_index, source=_schema_index_source(schema_index), include_datasets=True))
         return schema_index
@@ -567,6 +764,7 @@ def _index_trace_payload(schema_index: Any, *, source: str, include_datasets: bo
     field_limit = _trace_int_env("GATEWAY_TRACE_METADATA_FIELD_LIMIT", "SCHOOL_TRACE_METADATA_FIELD_LIMIT", 30)
     payload = {
         "source": source,
+        "field_load_mode": _schema_index_field_load_mode(schema_index),
         "school_id": schema_index.school_id,
         "school_name": schema_index.school_name,
         "schema_name": schema_index.source_schema,
@@ -578,6 +776,7 @@ def _index_trace_payload(schema_index: Any, *, source: str, include_datasets: bo
                 "label": dataset.label,
                 "source_view": dataset.source_view,
                 "fields_count": len(dataset.fields),
+                "field_load_mode": str(getattr(dataset, "raw", {}).get("field_load_mode") or ""),
             }
             for dataset in schema_index.datasets[:20]
         ],
@@ -589,6 +788,7 @@ def _index_trace_payload(schema_index: Any, *, source: str, include_datasets: bo
                 "label": dataset.label,
                 "source_view": dataset.source_view,
                 "fields_count": len(dataset.fields),
+                "field_load_mode": str(getattr(dataset, "raw", {}).get("field_load_mode") or ""),
                 "fields": [
                     {
                         "field_id": str(getattr(field, "field_id", "") or ""),
@@ -602,6 +802,26 @@ def _index_trace_payload(schema_index: Any, *, source: str, include_datasets: bo
             for dataset in schema_index.datasets[:dataset_limit]
         ]
     return payload
+
+
+def _agent_schema_index_load_fields() -> bool:
+    raw = _env_value("SCHOOL_AGENT_SCHEMA_INDEX_LOAD_FIELDS", "TENANT_AGENT_SCHEMA_INDEX_LOAD_FIELDS", "0")
+    return str(raw or "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _schema_index_field_load_mode(schema_index: Any) -> str:
+    datasets = list(getattr(schema_index, "datasets", []) or [])
+    modes = {
+        str(getattr(dataset, "raw", {}).get("field_load_mode") or "").strip()
+        for dataset in datasets
+        if isinstance(getattr(dataset, "raw", None), dict)
+    }
+    modes.discard("")
+    if len(modes) == 1:
+        return next(iter(modes))
+    if modes:
+        return ",".join(sorted(modes))
+    return "unknown"
 
 
 def _business_trace_fields(fields: list[Any], *, limit: int) -> list[Any]:
@@ -676,11 +896,16 @@ def _agent_native_prompt(
             "只调用可用工具；工具失败按返回 error 处理。",
             tool_contract_prompt or "工具合同：无。",
             "输入包含当前时间、历史 SQL、表目录和用户问题。",
-            "表目录不是字段清单；写 SQL 前先用 ddl_search 获取相关表和 candidate_evidence_packets。",
+            "表目录不是字段清单；需要写 SQL 查询具体事实数据前，先用 ddl_search 获取相关表和 candidate_evidence_packets。",
+            "如果用户的问题是学校有哪些业务领域、有哪些表、支持什么功能模块等宏观目录盘点，"
+            "且输入已提供当前学校业务表目录快照，通常可先依据快照按表名前缀/主题词归纳，并调用 final_answer_handoff 交接。",
             "若 ddl_search 返回 sql_ready=true、sql_ready_risk=low，且问题可由明确单表字段回答，"
             "优先使用 recommended_time_field、latest_row_preview 和候选字段直接调用 sql_db_query。",
+            "若工具合同/回答焦点包含 P0/P1/P2：首轮只围绕 P0 调用 ddl_search 和 SQL；"
+            "P1/P2 只有在其触发条件满足后才补查，角色提示词只影响分析角度，不能自动扩大查询范围。",
             "只有字段含义、JSONB/数组展开、多表关联、大小写敏感列名或时间口径不明确时，才继续 inspect_table_schema/sample_table_rows，并说明原因。",
-            "DDL/工具返回是硬约束；历史 SQL 只作参考。",
+            "DDL/工具返回是硬约束；生成 SQL 时只使用当前表 DDL/evidence/inspect 中出现的精确字段名，"
+            "不要把其他候选表或历史 SQL 的字段迁移到本表；字段没有证据时先 inspect_table_schema 修正。历史 SQL 只作参考。",
             "只执行当前 schema 的只读 SELECT；不得编造表、字段、数字、名单或政策。",
             "JSONB/数组字段先 sample_table_rows 或 inspect_jsonb_recordset；需要展开时用 jsonb_recordset_query。",
             "计数按稳定 ID 去重；没有 ID 时按姓名或名称去重；不要把 row_count 直接当人数。",
@@ -695,7 +920,8 @@ def _agent_native_prompt(
             -2,
             (
                 "完成必要查询后调用 final_answer_handoff 交接 JSON；不要直接输出长答案。"
-                "JSON 优先包含 result_id、row_count、pure_business_data_markdown、source_views、caveats。"
+                "JSON 优先包含 result_id、row_count、business_domains/items、source_views、caveats。"
+                "不要把完整 Markdown 长答案放入 handoff_json；最终自然表达由 final answer 模型完成。"
                 "不要包含个人敏感明细。"
             ),
         )
@@ -921,7 +1147,7 @@ def _direct_snapshot_answer(*, question: str, handoff_payload: dict[str, Any]) -
     return _first_truth_data_markdown(handoff_payload).strip()
 
 
-def _scripted_handoff_answer(handoff_payload: dict[str, Any]) -> str:
+def _scripted_handoff_answer(handoff_payload: dict[str, Any], *, business_prompt_context: str = "") -> str:
     if _env_value("SCHOOL_AGENT_SCRIPTED_HANDOFF_FINAL_ENABLED", default="1").lower() not in {"1", "true", "yes", "on"}:
         return ""
     if not isinstance(handoff_payload, dict):
@@ -930,26 +1156,81 @@ def _scripted_handoff_answer(handoff_payload: dict[str, Any]) -> str:
     if not markdown:
         return ""
     answer = _sanitize_final_answer(markdown)
-    caveats = _business_caveats(handoff_payload.get("caveats"))
+    caveats: list[str] = []
+    for payload in _business_handoff_payloads(handoff_payload):
+        caveats = _business_caveats(payload.get("caveats"))
+        if caveats:
+            break
     if caveats and not _answer_already_has_caveats(answer):
         answer = answer.rstrip() + "\n\n### 注意事项\n" + "\n".join(f"- {item}" for item in caveats)
-    return answer.strip()
+    return _append_business_disclaimer(answer.strip(), business_prompt_context=business_prompt_context)
 
 
 def _business_answer_markdown(handoff_payload: dict[str, Any]) -> str:
-    for key in (
-        "pure_business_data_markdown",
-        "truth_data_markdown",
-        "final_answer",
-        "answer",
-        "answer_markdown",
-        "summary_markdown",
-        "summary",
-    ):
-        value = handoff_payload.get(key)
-        if isinstance(value, str) and value.strip() and not _looks_like_internal_payload(value):
-            return value.strip()
-    return _first_truth_data_markdown(handoff_payload).strip()
+    for payload in _business_handoff_payloads(handoff_payload):
+        for key in (
+            "pure_business_data_markdown",
+            "final_answer",
+            "answer",
+            "answer_markdown",
+            "summary_markdown",
+            "summary",
+        ):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip() and not _looks_like_internal_payload(value):
+                return value.strip()
+    return ""
+
+
+def _business_handoff_payloads(handoff_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(handoff_payload, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    queue: list[dict[str, Any]] = [handoff_payload]
+    seen: set[int] = set()
+    while queue and len(out) < 8:
+        payload = queue.pop(0)
+        identity = id(payload)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        out.append(payload)
+        for key in ("summary", "final_answer", "answer", "answer_markdown", "handoff_json"):
+            parsed = _loads_json_object(payload.get(key))
+            if parsed:
+                queue.append(parsed)
+    return out
+
+
+def _append_business_disclaimer(answer: str, *, business_prompt_context: str = "") -> str:
+    clean = str(answer or "").strip()
+    disclaimer = _business_prompt_disclaimer(business_prompt_context)
+    if not clean or not disclaimer or disclaimer in clean:
+        return clean
+    return clean.rstrip() + "\n\n" + disclaimer
+
+
+def _business_prompt_disclaimer(business_prompt_context: str) -> str:
+    payload = _loads_json_object(str(business_prompt_context or ""))
+    found = _first_key_text(payload, "disclaimer")
+    return found.strip()
+
+
+def _first_key_text(value: Any, key_name: str) -> str:
+    if isinstance(value, dict):
+        value_at_key = value.get(key_name)
+        if isinstance(value_at_key, str) and value_at_key.strip():
+            return value_at_key
+        for nested in value.values():
+            found = _first_key_text(nested, key_name)
+            if found:
+                return found
+    if isinstance(value, list):
+        for nested in value:
+            found = _first_key_text(nested, key_name)
+            if found:
+                return found
+    return ""
 
 
 def _business_caveats(value: Any) -> list[str]:
@@ -1071,13 +1352,14 @@ async def _stream_fast_final_answer(
     question: str,
     handoff_payload: dict[str, Any],
     source_views: list[str],
+    business_prompt_context: str = "",
 ) -> AsyncIterator[str]:
     direct_answer = _direct_snapshot_answer(question=question, handoff_payload=handoff_payload)
     if direct_answer:
         yield direct_answer
         return
 
-    scripted_answer = _scripted_handoff_answer(handoff_payload)
+    scripted_answer = _scripted_handoff_answer(handoff_payload, business_prompt_context=business_prompt_context)
     if scripted_answer:
         handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
         with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
@@ -1108,8 +1390,14 @@ async def _stream_fast_final_answer(
     model = agent_model_for_tool_loop(final_model)
     first_token_ms: int | None = None
     chunk_count = 0
+    answer_parts: list[str] = []
     started = datetime.now().timestamp()
-    prompt = _fast_final_answer_prompt(question=question, handoff_payload=handoff_payload, source_views=source_views)
+    prompt = _fast_final_answer_prompt(
+        question=question,
+        handoff_payload=handoff_payload,
+        source_views=source_views,
+        business_prompt_context=business_prompt_context,
+    )
     system_prompt = _fast_final_answer_system_prompt()
     handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
     with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
@@ -1120,6 +1408,7 @@ async def _stream_fast_final_answer(
                     "question": question,
                     "source_views": source_views,
                     "handoff_chars": len(handoff_text),
+                    "business_prompt_chars": len(str(business_prompt_context or "")),
                 },
                 "decision": {
                     "model_name": _model_name(final_model),
@@ -1128,6 +1417,7 @@ async def _stream_fast_final_answer(
                 },
                 "output": {
                     "handoff_json": trace_preview(handoff_text),
+                    "business_prompt_context": trace_preview(business_prompt_context),
                     "system_prompt": trace_preview(system_prompt),
                     "final_prompt": trace_preview(prompt),
                 },
@@ -1143,6 +1433,7 @@ async def _stream_fast_final_answer(
             "handoff_chars": len(handoff_text),
             "source_views": source_views,
             "handoff_json": trace_preview(handoff_text),
+            "business_prompt_context": trace_preview(business_prompt_context),
             "final_prompt": trace_preview(prompt),
         },
     ) as step:
@@ -1162,6 +1453,7 @@ async def _stream_fast_final_answer(
             if first_token_ms is None:
                 first_token_ms = max(0, int((datetime.now().timestamp() - started) * 1000))
             chunk_count += 1
+            answer_parts.append(text)
             yield text
         set_step_output(
             step,
@@ -1175,6 +1467,9 @@ async def _stream_fast_final_answer(
         )
         if usage["total_tokens"] > 0:
             _add_trace_usage(usage)
+    disclaimer = _business_prompt_disclaimer(business_prompt_context)
+    if disclaimer and disclaimer not in "".join(answer_parts):
+        yield "\n\n" + disclaimer
 
 
 def _final_answer_handoff_tool(
@@ -1207,7 +1502,10 @@ def _final_answer_handoff_tool(
         name="final_answer_handoff",
         description=(
             "当你已完成必要数据查询、联网/政策检索和业务证据核验，准备交接证据时调用。"
-            "不要直接输出长答案；把紧凑 JSON 字符串放入 handoff_json。"
+            "把紧凑 JSON 字符串放入 handoff_json。"
+            "不要把完整 Markdown 长答案放入 handoff_json；最终自然语言表达由 final answer 模型完成。"
+            "目录盘点类问题优先交接 business_domains/items/source_views/caveats 等结构化字段，"
+            "每项只保留名称、数量、代表性表或关键证据短语。"
         ),
         func=_run,
     )
@@ -1221,44 +1519,23 @@ def _fallback_final_handoff_payload(*, question: str, tools: Any, caveat: str = 
         evidence_board = {}
     source_views = list(getattr(tools, "source_views", []) or [])
     evidence_by_task = getattr(tools, "evidence_by_task", {}) or {}
-    return {
+    payload = {
         "question": question,
         "data_evidence": evidence_by_task,
         "evidence_board": evidence_board,
         "external_evidence": [],
-        "pure_business_data_markdown": _first_truth_data_markdown(
-            {"data_evidence": evidence_by_task, "evidence_board": evidence_board}
-        ),
+        "pure_business_data_markdown": "",
         "source_views": source_views,
         "caveats": [caveat] if caveat else [],
     }
+    if _is_direct_snapshot_request(question):
+        payload["pure_business_data_markdown"] = _first_truth_data_markdown(
+            {"data_evidence": evidence_by_task, "evidence_board": evidence_board}
+        )
+    return payload
 
 
-async def _is_guard_router_chat(*, trace: Any = None, model: Any, question: str) -> bool:
-    if str(os.getenv("SCHOOL_AGENT_GUARD_ROUTER_ENABLED", "1")).strip().lower() in {"0", "false", "no", "off"}:
-        return False
-    prompt = (
-        "你是学校智能助手入口路由。只输出 DATA 或 CHAT。\n"
-        "需要查学校数据库、政策、公开网页、图表/图片/PPT或任何工具，输出 DATA。\n"
-        "只是日常问答、打招呼、通用写作、翻译、编程或泛泛解释，输出 CHAT。"
-    )
-    try:
-        timeout = max(0.3, min(float(os.getenv("SCHOOL_AGENT_GUARD_ROUTER_TIMEOUT_SEC", "2.5") or "2.5"), 8.0))
-        with trace_step(trace, "agent_native.guard_router.llm", {"model_name": _model_name(model), "question": question}) as step:
-            result = await asyncio.wait_for(
-                agent_model_for_tool_loop(model).ainvoke([SystemMessage(content=prompt), HumanMessage(content=question)]),
-                timeout=timeout,
-            )
-            usage = _extract_chunk_usage(result)
-            set_step_output(step, {"decision": _chunk_text(result).strip(), "usage": usage, "model_name": _model_name(model)})
-            if usage["total_tokens"] > 0:
-                _add_trace_usage(usage)
-        return _chunk_text(result).strip().upper().startswith("CHAT")
-    except Exception:
-        return False
-
-
-async def _stream_guard_router_chat(*, trace: Any = None, model: Any, question: str, conversation_context: str = "") -> AsyncIterator[str]:
+async def _stream_contract_plan_chat(*, trace: Any = None, model: Any, question: str, conversation_context: str = "") -> AsyncIterator[str]:
     user_prompt = question
     if str(conversation_context or "").strip():
         user_prompt = f"【最近对话上下文】\n{conversation_context[:4000]}\n\n【用户问题】\n{question}"
@@ -1301,12 +1578,13 @@ def _run_fast_final_answer_sync(
     question: str,
     handoff_payload: dict[str, Any],
     source_views: list[str],
+    business_prompt_context: str = "",
 ) -> str:
     direct_answer = _direct_snapshot_answer(question=question, handoff_payload=handoff_payload)
     if direct_answer:
         return direct_answer
 
-    scripted_answer = _scripted_handoff_answer(handoff_payload)
+    scripted_answer = _scripted_handoff_answer(handoff_payload, business_prompt_context=business_prompt_context)
     if scripted_answer:
         handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
         with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
@@ -1338,7 +1616,12 @@ def _run_fast_final_answer_sync(
     chunk_count = 0
     started = datetime.now().timestamp()
     answer_parts: list[str] = []
-    prompt = _fast_final_answer_prompt(question=question, handoff_payload=handoff_payload, source_views=source_views)
+    prompt = _fast_final_answer_prompt(
+        question=question,
+        handoff_payload=handoff_payload,
+        source_views=source_views,
+        business_prompt_context=business_prompt_context,
+    )
     system_prompt = _fast_final_answer_system_prompt()
     handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
     with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
@@ -1349,6 +1632,7 @@ def _run_fast_final_answer_sync(
                     "question": question,
                     "source_views": source_views,
                     "handoff_chars": len(handoff_text),
+                    "business_prompt_chars": len(str(business_prompt_context or "")),
                 },
                 "decision": {
                     "model_name": _model_name(final_model),
@@ -1357,6 +1641,7 @@ def _run_fast_final_answer_sync(
                 },
                 "output": {
                     "handoff_json": trace_preview(handoff_text),
+                    "business_prompt_context": trace_preview(business_prompt_context),
                     "system_prompt": trace_preview(system_prompt),
                     "final_prompt": trace_preview(prompt),
                 },
@@ -1372,6 +1657,7 @@ def _run_fast_final_answer_sync(
             "handoff_chars": len(handoff_text),
             "source_views": source_views,
             "handoff_json": trace_preview(handoff_text),
+            "business_prompt_context": trace_preview(business_prompt_context),
             "final_prompt": trace_preview(prompt),
         },
     ) as step:
@@ -1404,7 +1690,7 @@ def _run_fast_final_answer_sync(
         )
         if usage["total_tokens"] > 0:
             _add_trace_usage(usage)
-    return "".join(answer_parts)
+    return _append_business_disclaimer("".join(answer_parts), business_prompt_context=business_prompt_context)
 
 
 def _fast_final_answer_system_prompt() -> str:
@@ -1412,36 +1698,55 @@ def _fast_final_answer_system_prompt() -> str:
         "你根据客观证据包回答学校数据问题。"
         "所有数字、名单、判断、政策与来源必须来自证据，不得新增未提供的事实。"
         "禁止向用户泄露 SQL、数据表名、工具名、Handoff JSON、内部节点名或“我先查询/我需要查看”等过程性话术。"
-        "在不改变事实的前提下，可以自由组织最终呈现方式。"
+        "在不改变事实的前提下，可以自由组织最终呈现方式；用自然、克制、面向学校管理者的语言，避免模板腔和生硬口号。"
     )
 
 
-def _fast_final_answer_prompt(*, question: str, handoff_payload: dict[str, Any], source_views: list[str]) -> str:
+def _fast_final_answer_prompt(
+    *,
+    question: str,
+    handoff_payload: dict[str, Any],
+    source_views: list[str],
+    business_prompt_context: str = "",
+) -> str:
     style_guide = _fast_final_answer_style_guide(
         question=question,
         handoff_payload=handoff_payload,
         source_views=source_views,
+        business_prompt_context=business_prompt_context,
     )
     return "\n".join(
         [
             "客观证据包：",
             style_guide,
-            "基于证据回答用户问题。呈现方式自由；不要泄露内部结构，不要复述工具过程，不要说“根据校医院反馈”等未提供来源。",
+            "基于证据回答用户问题。呈现方式自由；结合业务提示词里的证据边界，用清楚、柔和、可读的学校业务语言表达；不要泄露内部结构，不要复述工具过程，不要说“根据校医院反馈”等未提供来源。",
         ]
     )
 
 
-def _fast_final_answer_style_guide(*, question: str, handoff_payload: dict[str, Any], source_views: list[str]) -> str:
+def _fast_final_answer_style_guide(
+    *,
+    question: str,
+    handoff_payload: dict[str, Any],
+    source_views: list[str],
+    business_prompt_context: str = "",
+) -> str:
     q = str(question or "")
     views = " ".join(str(item or "") for item in source_views)
     payload_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
-    combined = f"{q} {views} {payload_text}"
+    business_prompt_text = str(business_prompt_context or "").strip()
+    combined = f"{q} {views} {payload_text} {business_prompt_text}"
     evidence_matrix: dict[str, Any] = {
         "user_original_question": q,
         "source_views": list(source_views or []),
-        "handoff_evidence": handoff_payload,
+        "handoff_evidence": _compact_final_handoff_payload(handoff_payload),
     }
+    if business_prompt_text:
+        evidence_matrix["业务提示词/证据边界"] = business_prompt_text
+        evidence_matrix["business_prompt_context"] = business_prompt_text
     evidence_notes: list[str] = []
+    if any(token in combined for token in ["业务领域", "业务域", "功能模块", "数据资产", "表目录"]):
+        evidence_notes.append("业务领域边界：按表名前缀或主题词归纳，说明这是目录口径；不要把目录盘点写成具体运营指标结论。")
     if any(token in combined for token in ["德育", "行规", "扣分", "纪律"]):
         evidence_notes.append("德育/行规边界：注意区分检查方、值周方、扣分类别、班级/年级和时间窗口。")
     if any(token in combined for token in ["请假", "病假", "事假", "返校", "晨午检"]):
@@ -1464,6 +1769,108 @@ def _fast_final_answer_style_guide(*, question: str, handoff_payload: dict[str, 
         f"{json.dumps(evidence_matrix, ensure_ascii=False, default=str, indent=2)}\n"
         "========================================================"
     )
+
+
+def _compact_final_handoff_payload(handoff_payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(handoff_payload, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in (
+        "question",
+        "status",
+        "answer_focus",
+        "summary",
+        "final_answer",
+        "answer",
+        "answer_markdown",
+        "pure_business_data_markdown",
+        "business_domains",
+        "items",
+        "metrics",
+        "key_findings",
+        "caveats",
+        "source_views",
+        "external_evidence",
+    ):
+        value = handoff_payload.get(key)
+        if value not in (None, "", [], {}):
+            compact[key] = _compact_json_value(value, max_chars=3000)
+    digest = _evidence_digest(handoff_payload.get("data_evidence"))
+    if digest:
+        compact["evidence_digest"] = digest
+    board_digest = _evidence_board_digest(handoff_payload.get("evidence_board"))
+    if board_digest:
+        compact["evidence_board_digest"] = board_digest
+    return compact
+
+
+def _evidence_digest(data_evidence: Any) -> list[dict[str, Any]]:
+    if not isinstance(data_evidence, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for task_id, task in data_evidence.items():
+        if not isinstance(task, dict):
+            continue
+        summary = task.get("evidence_summary") if isinstance(task.get("evidence_summary"), dict) else {}
+        item: dict[str, Any] = {
+            "task_id": str(task_id),
+            "row_count": task.get("row_count", summary.get("row_count")),
+            "referenced_views": task.get("referenced_views", summary.get("referenced_views")),
+        }
+        for key in ("dataset_label", "intent", "total_row_count", "query_may_have_more", "total_count_error"):
+            value = task.get(key)
+            if value not in (None, "", [], {}):
+                item[key] = value
+        for key in ("truth_data_markdown", "notable_findings", "top_items", "row_sample"):
+            value = summary.get(key)
+            if value not in (None, "", [], {}):
+                item[key] = _compact_json_value(value, max_chars=1800)
+        sql_lineage = task.get("sql_lineage")
+        if isinstance(sql_lineage, dict):
+            item["sql_lineage"] = {
+                key: sql_lineage.get(key)
+                for key in ("tables_used", "row_count", "time_range")
+                if sql_lineage.get(key) not in (None, "", [], {})
+            }
+        out.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
+        if len(out) >= _final_answer_evidence_digest_limit():
+            break
+    return out
+
+
+def _evidence_board_digest(evidence_board: Any) -> dict[str, Any]:
+    if not isinstance(evidence_board, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("business_clues", "caveats", "source_views", "tasks"):
+        value = evidence_board.get(key)
+        if value not in (None, "", [], {}):
+            out[key] = _compact_json_value(value, max_chars=2000)
+    return out
+
+
+def _compact_json_value(value: Any, *, max_chars: int) -> Any:
+    if isinstance(value, str):
+        return _truncate(value, max_chars)
+    if isinstance(value, list):
+        return [_compact_json_value(item, max_chars=max_chars) for item in value[:20]]
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for index, (key, nested) in enumerate(value.items()):
+            if index >= 30:
+                break
+            if str(key) in {"raw_rows", "rows", "data_evidence", "evidence_board"}:
+                continue
+            out[str(key)] = _compact_json_value(nested, max_chars=max_chars)
+        return out
+    return value
+
+
+def _final_answer_evidence_digest_limit() -> int:
+    try:
+        return max(3, min(int(_env_value("SCHOOL_FINAL_ANSWER_EVIDENCE_DIGEST_LIMIT", default="24") or "24"), 80))
+    except Exception:
+        return 24
 
 
 def _chunk_text(chunk: Any) -> str:
@@ -1525,9 +1932,17 @@ def _is_final_model_langgraph_event(event: dict[str, Any], *, final_model: Any, 
     return False
 
 
-def _enhanced_content(*, question: str, sql_experience: str, ddl_context: str, conversation_context: str = "") -> str:
+def _enhanced_content(
+    *,
+    question: str,
+    sql_experience: str,
+    ddl_context: str,
+    conversation_context: str = "",
+    prefetched_ddl_context: str = "",
+) -> str:
     now = datetime.now()
     startup_ddl_context = _startup_catalog_context_for_prompt(ddl_context)
+    history_context = _history_context_for_prompt(question=question, sql_experience=sql_experience)
     parts = [
         f"【当前系统参照时间】: {now.strftime('%Y-%m-%d %H:%M:%S')} ({now.strftime('%A')})",
     ]
@@ -1540,22 +1955,66 @@ def _enhanced_content(*, question: str, sql_experience: str, ddl_context: str, c
         )
     parts.extend(
         [
-            f"【历史相似 SQL 案例】:\n{_truncate(sql_experience, 6000)}",
+            f"【历史相似 SQL 案例】:\n{_truncate(history_context, 6000)}",
             (
                 "【数据库表目录（无详细DDL）】:\n"
                 f"{startup_ddl_context}\n\n"
                 "说明：这里默认只放表名和一句话业务描述，避免每轮 Agent 调用携带全量表结构。"
-                "确定方向后先调用 ddl_search 动态载入候选表和 evidence packet；"
+                f"{_catalog_overview_decision_guide(question)}"
+                "需要写 SQL 查询具体事实数据时，先调用 ddl_search 动态载入候选表和 evidence packet；"
                 "若 sql_ready=true 且风险低，优先直接 sql_db_query；否则再 inspect/sample 补证。"
                 "无关表结构不要继续保留在推理中。"
             ),
-            f"【用户原始问题】: {question}",
         ]
     )
+    if str(prefetched_ddl_context or "").strip():
+        parts.append(
+            "【启动前已预取 DDL/evidence】:\n"
+            f"{_truncate(prefetched_ddl_context, _startup_prefetch_context_max_chars())}\n"
+            "说明：这部分由代码在进入 ReAct 前调用 ddl_search 预取，等同于相关表的 ddl_search 已完成；"
+            "如果字段、时间口径和单表/多表关系已经清楚，可以直接基于这些 evidence 生成 sql_db_query。"
+            "只有缺少字段证据、JSON/数组结构不清或关联口径不明时，再补充调用 ddl_search/inspect/sample。"
+        )
+    parts.append(f"【用户原始问题】: {question}")
     return "\n\n".join(parts)
 
 
+def _history_context_for_prompt(*, question: str, sql_experience: str) -> str:
+    if not _is_catalog_overview_question(question):
+        return str(sql_experience or "")
+    parsed = _loads_json_object(sql_experience)
+    if not parsed:
+        return str(sql_experience or "")
+    experiences = parsed.get("experiences")
+    if not isinstance(experiences, list):
+        return str(sql_experience or "")
+    clean_items: list[dict[str, Any]] = []
+    for item in experiences[:5]:
+        if not isinstance(item, dict):
+            continue
+        clean_items.append(
+            {
+                "question": item.get("question"),
+                "table_refs": item.get("table_refs") or [],
+                "answer_summary": item.get("answer_summary") or "",
+                "source": item.get("source") or "",
+                "manual_hint": bool(item.get("manual_hint")),
+            }
+        )
+    payload = {
+        "source": parsed.get("source") or "sql_history_vector_documents",
+        "query": parsed.get("query") or question,
+        "experience_count": parsed.get("experience_count") or len(clean_items),
+        "manual_hint_count": parsed.get("manual_hint_count") or 0,
+        "usage_hint": "目录盘点题只参考历史口径和表选择提示；不直接沿用历史 SQL。",
+        "experiences": clean_items,
+    }
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
 def _startup_catalog_context_for_prompt(ddl_context: str) -> str:
+    if _is_full_catalog_snapshot_context(ddl_context):
+        return _truncate(str(ddl_context or ""), _startup_catalog_max_chars())
     mode = _env_value("SCHOOL_AGENT_STARTUP_DDL_MODE", "TENANT_AGENT_STARTUP_DDL_MODE", "summary").lower()
     if mode in {"full", "legacy"}:
         return _truncate(ddl_context, _startup_ddl_max_chars(default=9000))
@@ -1565,6 +2024,11 @@ def _startup_catalog_context_for_prompt(ddl_context: str) -> str:
     if summary:
         return _truncate(summary, _startup_ddl_max_chars(default=1800))
     return _truncate(str(ddl_context or ""), _startup_ddl_max_chars(default=1200))
+
+
+def _is_full_catalog_snapshot_context(ddl_context: str) -> bool:
+    text = str(ddl_context or "")
+    return "全量业务表目录快照" in text
 
 
 def _summarize_ddl_candidates(ddl_context: str, *, max_tables: int) -> str:
@@ -1609,6 +2073,8 @@ def _schema_catalog_context(schema_index: Any, *, question: str = "") -> str:
     datasets = list(getattr(schema_index, "datasets", []) or [])
     if not datasets:
         return "未加载到数据库表目录；请先调用 list_available_tables 或 ddl_search。"
+    if _is_catalog_overview_question(question):
+        return _full_catalog_snapshot_context(schema_index, datasets=datasets)
     max_tables = _startup_catalog_max_tables()
     scored = sorted(
         datasets,
@@ -1638,6 +2104,42 @@ def _schema_catalog_context(schema_index: Any, *, question: str = "") -> str:
         low_hint = "低相关表" if low else "候选表"
         lines.append(f"已省略：{omitted} 张{low_hint}未注入启动上下文；需要时调用 list_available_tables 或 ddl_search 扩展检索。")
     return _truncate("\n".join(lines), _startup_catalog_max_chars())
+
+
+def _full_catalog_snapshot_context(schema_index: Any, *, datasets: list[Any]) -> str:
+    max_tables = _startup_catalog_max_tables()
+    ordered = sorted(datasets, key=lambda item: str(getattr(item, "source_view", "") or getattr(item, "label", "") or ""))
+    shown = ordered[:max_tables]
+    lines = [
+        "全量业务表目录快照（当前学校租户已动态加载的业务表，格式：表名: 业务含义描述）：",
+        *[_format_catalog_dataset_line(dataset, fallback_schema=schema_index.source_schema) for dataset in shown],
+    ]
+    omitted = max(0, len(ordered) - len(shown))
+    if omitted:
+        lines.append(f"已省略：{omitted} 张表未放入本次快照；需要完整清单时可再扩展目录查询。")
+    lines.append(_catalog_overview_decision_guide("学校有哪些业务领域？").strip())
+    return _truncate("\n".join(lines), _startup_catalog_max_chars())
+
+
+def _catalog_overview_decision_guide(question: str) -> str:
+    if not _is_catalog_overview_question(question):
+        return ""
+    return (
+        "运行时决策提示：如果当前问题属于宏观全局盘点型发问，例如询问学校有哪些业务领域、有哪些表、"
+        "支持什么功能模块等，以上目录快照通常情况下已经包含本校功能大盘事实；"
+        "可直接依据目录快照按表名前缀或主题词归纳业务领域，并调用 final_answer_handoff 交接。"
+        "如果用户继续追问某个领域的字段、明细、时间范围、人数、异常或具体指标，再下钻调用工具补证。"
+    )
+
+
+def _is_catalog_overview_question(question: str) -> bool:
+    text = str(question or "")
+    if not text:
+        return False
+    return bool(
+        any(token in text for token in ["业务领域", "业务域", "功能模块", "业务模块", "数据资产", "表目录", "哪些表", "有哪些表"])
+        or ("有哪些" in text and any(token in text for token in ["领域", "模块", "功能"]))
+    )
 
 
 def _tier_catalog_datasets(datasets: list[Any], *, question: str) -> tuple[list[Any], list[Any], list[Any]]:
