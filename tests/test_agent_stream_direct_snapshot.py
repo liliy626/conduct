@@ -5,6 +5,34 @@ from types import SimpleNamespace
 import gateway_core.agents.school_sql.agent_stream as agent_stream
 
 
+def test_schema_catalog_context_compacts_teacher_leave_candidates(monkeypatch) -> None:
+    datasets = [
+        SimpleNamespace(source_schema="zx_mlh", source_view="教师销假_请假明细", label="教师销假_请假明细", description="教师请假新表"),
+        SimpleNamespace(source_schema="zx_mlh", source_view="教师销假_离校报备", label="教师销假_离校报备", description="教师离校报备"),
+        SimpleNamespace(source_schema="zx_mlh", source_view="考勤管理_教师请假_因公", label="考勤管理_教师请假_因公", description="旧因公请假表"),
+        SimpleNamespace(source_schema="zx_mlh", source_view="考勤管理_教师请假_因私", label="考勤管理_教师请假_因私", description="旧因私请假表"),
+        SimpleNamespace(source_schema="zx_mlh", source_view="考勤管理_考勤统计数据", label="考勤管理_考勤统计数据", description="教师考勤统计"),
+        SimpleNamespace(source_schema="zx_mlh", source_view="人事档案_人员信息", label="人事档案_人员信息", description="教师人员档案"),
+        SimpleNamespace(source_schema="zx_mlh", source_view="学生评教_主课老师底表", label="学生评教_主课老师底表", description="学生评教教师底表"),
+        SimpleNamespace(source_schema="zx_mlh", source_view="AI五育管理平台_作品信息表", label="AI五育管理平台_作品信息表", description="学生作品"),
+    ]
+    schema_index = SimpleNamespace(source_schema="zx_mlh", datasets=datasets)
+    monkeypatch.setattr(agent_stream, "_startup_catalog_max_tables", lambda: 6)
+    monkeypatch.setattr(agent_stream, "_startup_catalog_max_chars", lambda: 2000)
+
+    context = agent_stream._schema_catalog_context(schema_index, question="今天教师请假人数是多少？")
+
+    assert "强相关候选：" in context
+    assert "可能相关但需二次确认：" in context
+    assert "已省略" in context
+    assert "zx_mlh.教师销假_请假明细" in context
+    assert "zx_mlh.教师销假_离校报备" in context
+    assert "zx_mlh.考勤管理_教师请假_因公" in context
+    assert "zx_mlh.人事档案_人员信息" in context
+    assert "zx_mlh.学生评教_主课老师底表" not in context
+    assert "zx_mlh.AI五育管理平台_作品信息表" not in context
+
+
 def test_direct_snapshot_answer_uses_truth_markdown_for_table_only_request() -> None:
     handoff_payload = {
         "data_evidence": {

@@ -1461,27 +1461,96 @@ def _schema_catalog_context(schema_index: Any, *, question: str = "") -> str:
         key=lambda item: _catalog_dataset_score(item, question=question),
         reverse=True,
     )
+    # 启动上下文只注入分层摘要；完整表目录仍保留在 schema_index，后续可用 ddl_search 扩展。
+    strong, possible, low = _tier_catalog_datasets(scored, question=question)
+    strong_limit = max(1, min(len(strong), max_tables))
+    possible_limit = max(0, min(len(possible), max_tables - strong_limit))
     lines: list[str] = []
-    for dataset in scored[:max_tables]:
-        source_schema = str(getattr(dataset, "source_schema", "") or getattr(schema_index, "source_schema", "") or "").strip()
-        source_view = str(getattr(dataset, "source_view", "") or getattr(dataset, "dataset_id", "") or "").strip()
-        label = str(getattr(dataset, "label", "") or source_view).strip()
-        desc = str(getattr(dataset, "description", "") or getattr(dataset, "searchable_text", "") or "").strip()
-        table_ref = f"{source_schema}.{source_view}" if source_schema and source_view else source_view
-        if desc:
-            desc = _truncate(re.sub(r"\s+", " ", desc), 120)
-            lines.append(f"- {table_ref}: {label}；{desc}")
-        else:
-            lines.append(f"- {table_ref}: {label}")
-    omitted = max(0, len(datasets) - min(len(datasets), max_tables))
+    if strong:
+        lines.append("强相关候选：")
+        lines.extend(_format_catalog_dataset_line(dataset, fallback_schema=schema_index.source_schema) for dataset in strong[:strong_limit])
+    if possible_limit:
+        lines.append("可能相关但需二次确认：")
+        lines.extend(
+            _format_catalog_dataset_line(dataset, fallback_schema=schema_index.source_schema)
+            for dataset in possible[:possible_limit]
+        )
+    if not lines:
+        lines.append("强相关候选：")
+        lines.extend(_format_catalog_dataset_line(dataset, fallback_schema=schema_index.source_schema) for dataset in scored[:max_tables])
+    shown = strong[:strong_limit] + possible[:possible_limit]
+    omitted = max(0, len(datasets) - len(shown))
     if omitted:
-        lines.append(f"- ... 还有 {omitted} 张表未展示；需要时调用 list_available_tables 或 ddl_search 扩展检索。")
+        low_hint = "低相关表" if low else "候选表"
+        lines.append(f"已省略：{omitted} 张{low_hint}未注入启动上下文；需要时调用 list_available_tables 或 ddl_search 扩展检索。")
     return _truncate("\n".join(lines), _startup_catalog_max_chars())
+
+
+def _tier_catalog_datasets(datasets: list[Any], *, question: str) -> tuple[list[Any], list[Any], list[Any]]:
+    # 先分层再截断，避免低相关但命中“教师/学生”的表挤占关键业务表注意力。
+    strong: list[Any] = []
+    possible: list[Any] = []
+    low: list[Any] = []
+    for dataset in datasets:
+        tier = _catalog_dataset_tier(dataset, question=question)
+        if tier == "strong":
+            strong.append(dataset)
+        elif tier == "possible":
+            possible.append(dataset)
+        else:
+            low.append(dataset)
+    if not strong and possible:
+        strong.append(possible.pop(0))
+    return strong, possible, low
+
+
+def _catalog_dataset_tier(dataset: Any, *, question: str) -> str:
+    text = str(question or "")
+    haystack = _catalog_dataset_text(dataset)
+    if any(token in text for token in ["请假", "销假", "离校", "考勤"]):
+        # 请假/考勤类问题优先保留真实业务表；人事、课表、代课类表只作为补证候选。
+        leave_terms = ["请假", "销假", "离校", "考勤"]
+        person_terms = ["教师", "老师", "教职工", "人事"]
+        support_terms = ["人事", "人员", "档案", "执勤", "排班", "课后服务", "课表", "代课"]
+        if any(term in haystack for term in leave_terms) and any(term in haystack for term in person_terms):
+            return "strong"
+        if any(term in haystack for term in leave_terms):
+            return "possible"
+        if any(term in haystack for term in support_terms) and any(term in haystack for term in person_terms):
+            return "possible"
+        return "low"
+    score = _catalog_dataset_score(dataset, question=question)
+    if score >= 2:
+        return "strong"
+    if score > 0:
+        return "possible"
+    return "low"
+
+
+def _format_catalog_dataset_line(dataset: Any, *, fallback_schema: str = "") -> str:
+    source_schema = str(getattr(dataset, "source_schema", "") or fallback_schema or "").strip()
+    source_view = str(getattr(dataset, "source_view", "") or getattr(dataset, "dataset_id", "") or "").strip()
+    label = str(getattr(dataset, "label", "") or source_view).strip()
+    desc = str(getattr(dataset, "description", "") or getattr(dataset, "searchable_text", "") or "").strip()
+    table_ref = f"{source_schema}.{source_view}" if source_schema and source_view else source_view
+    if desc:
+        desc = _truncate(re.sub(r"\s+", " ", desc), 120)
+        return f"- {table_ref}: {label}；{desc}"
+    return f"- {table_ref}: {label}"
 
 
 def _catalog_dataset_score(dataset: Any, *, question: str) -> float:
     text = str(question or "")
-    haystack = " ".join(
+    haystack = _catalog_dataset_text(dataset)
+    score = 0.0
+    for term in _catalog_terms(text):
+        if term and term in haystack:
+            score += 2.0 if term in str(getattr(dataset, "source_view", "") or "") else 1.0
+    return score
+
+
+def _catalog_dataset_text(dataset: Any) -> str:
+    return " ".join(
         [
             str(getattr(dataset, "source_view", "") or ""),
             str(getattr(dataset, "label", "") or ""),
@@ -1489,11 +1558,6 @@ def _catalog_dataset_score(dataset: Any, *, question: str) -> float:
             str(getattr(dataset, "searchable_text", "") or ""),
         ]
     )
-    score = 0.0
-    for term in _catalog_terms(text):
-        if term and term in haystack:
-            score += 2.0 if term in str(getattr(dataset, "source_view", "") or "") else 1.0
-    return score
 
 
 def _catalog_terms(text: str) -> list[str]:
