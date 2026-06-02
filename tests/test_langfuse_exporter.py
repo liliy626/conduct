@@ -151,3 +151,45 @@ def test_langfuse_exporter_makes_sql_outputs_json_safe(monkeypatch) -> None:
     assert sql_start["start"]["input"]["params"] == ["2026-06-02T08:30:00"]
     assert sql_update["update"]["output"]["rows"][0]["date"] == "2026-06-02T09:15:00"
     assert sql_update["update"]["output"]["rows"][0]["duration"] == 1.5
+
+
+def test_langfuse_exporter_adds_unobserved_gap_spans(monkeypatch) -> None:
+    monkeypatch.setenv("LANGFUSE_ENABLED", "1")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-test")
+    trace = SchoolTrace(trace_id="trace_gap", question="学校最近有什么异常")
+    trace.created_at = 1000.0
+    trace.steps.append(
+        SchoolTraceStep(
+            name="agent_native.start",
+            input={"question": "学校最近有什么异常"},
+            output={},
+            duration_ms=100,
+            started_at=1000.0,
+            ended_at=1000.1,
+        )
+    )
+    trace.steps.append(
+        SchoolTraceStep(
+            name="chat_completion.final",
+            input={"question": "学校最近有什么异常"},
+            output={"final_answer": "有异常。"},
+            duration_ms=100,
+            started_at=1001.0,
+            ended_at=1001.1,
+        )
+    )
+    client = _FakeClient()
+
+    assert export_school_trace_to_langfuse(trace, client_factory=lambda: client) is True
+
+    root_update = next(call for call in client.calls if call["name"] == "学校数据流观测" and "update" in call)
+    summary = root_update["update"]["output"]["timing_summary"]
+    assert summary["trace_duration_ms"] == 1100
+    assert summary["recorded_step_duration_ms"] == 200
+    assert summary["recorded_coverage_ms"] == 200
+    assert summary["parallel_overlap_ms"] == 0
+    assert summary["unobserved_gap_ms"] == 900
+    gap_start = next(call for call in client.calls if call["name"] == "未观测耗时" and "start" in call)
+    assert gap_start["start"]["metadata"]["original_name"] == "trace.unobserved_gap"
+    assert gap_start["start"]["metadata"]["duration_ms"] == 900

@@ -5,7 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Callable
 
-from gateway_core.school.trace import SchoolTrace
+from gateway_core.school.trace import SchoolTrace, SchoolTraceStep
 
 
 _DISPLAY_NAMES = {
@@ -15,7 +15,7 @@ _DISPLAY_NAMES = {
     "agent_native.guard_router.llm": "智能体路由判断",
     "route_result": "路由结果",
     "domain_context": "业务上下文证据",
-    "metadata_selection": "元数据选择",
+    "metadata_selection": "元数据目录快照",
     "agent_native.contract.plan": "输出契约规划",
     "query_plan": "查询计划",
     "agent_native.start": "智能体启动",
@@ -28,7 +28,10 @@ _DISPLAY_NAMES = {
     "final_answer_context": "最终回答上下文",
     "context.build": "回答上下文组装",
     "chat_completion.final": "最终回答",
+    "trace.unobserved_gap": "未观测耗时",
 }
+
+_MIN_UNOBSERVED_GAP_MS = 50
 
 
 def langfuse_status(*, sdk_available: bool | None = None) -> dict[str, Any]:
@@ -81,7 +84,7 @@ def export_school_trace_to_langfuse(
                     metadata=_json_safe({"original_name": "chat_completion.final"}),
                 ) as final_span:
                     final_span.update(output=_json_safe({"answer": final_answer}))
-            for step in trace.steps:
+            for step in _steps_with_unobserved_gaps(trace):
                 with client.start_as_current_observation(
                     as_type="span",
                     name=_display_name(step.name),
@@ -143,7 +146,7 @@ def _export_school_trace_with_timing(trace: SchoolTrace, *, client: Any) -> bool
                     output_payload={"answer": final_answer},
                     metadata={"original_name": "chat_completion.final"},
                 )
-            for step in trace.steps:
+            for step in _steps_with_unobserved_gaps(trace):
                 _create_timed_observation(
                     client,
                     name=_display_name(step.name),
@@ -237,12 +240,131 @@ def _langfuse_base_url() -> str:
 
 def _trace_output(trace: SchoolTrace, *, final_answer: str = "") -> dict[str, Any]:
     has_error = any(step.status == "error" or step.error for step in trace.steps)
-    output: dict[str, Any] = {"status": "error" if has_error else "ok", "step_count": len(trace.steps)}
+    output: dict[str, Any] = {
+        "status": "error" if has_error else "ok",
+        "step_count": len(trace.steps),
+        "timing_summary": _trace_timing_summary(trace),
+    }
     if has_error and final_answer:
         output["status"] = "recovered"
         output["answer_status"] = "generated_with_internal_error"
         output["internal_error_count"] = sum(1 for step in trace.steps if step.status == "error" or step.error)
     return output
+
+
+def _trace_timing_summary(trace: SchoolTrace) -> dict[str, Any]:
+    trace_duration_ms = max(0, int(round((_trace_end_time(trace) - float(trace.created_at or 0)) * 1000)))
+    recorded_step_duration_ms = sum(max(0, int(step.duration_ms or 0)) for step in trace.steps)
+    recorded_coverage_ms = _recorded_coverage_ms(trace)
+    gaps = _unobserved_gap_steps(trace)
+    unobserved_gap_ms = sum(max(0, int(step.duration_ms or 0)) for step in gaps)
+    return {
+        "trace_duration_ms": trace_duration_ms,
+        "recorded_step_duration_ms": recorded_step_duration_ms,
+        "recorded_coverage_ms": recorded_coverage_ms,
+        "parallel_overlap_ms": max(0, recorded_step_duration_ms - recorded_coverage_ms),
+        "unobserved_gap_ms": unobserved_gap_ms,
+        "unobserved_gap_count": len(gaps),
+    }
+
+
+def _recorded_coverage_ms(trace: SchoolTrace) -> int:
+    trace_start = float(trace.created_at or 0)
+    trace_end = _trace_end_time(trace)
+    if not trace_start or trace_end <= trace_start:
+        return 0
+    intervals: list[tuple[float, float]] = []
+    for step in trace.steps:
+        start = float(step.started_at or 0)
+        end = float(step.ended_at or 0)
+        if not start:
+            continue
+        if end < start:
+            end = start
+        intervals.append((max(trace_start, start), min(trace_end, end)))
+    if not intervals:
+        return 0
+    intervals.sort()
+    coverage = 0.0
+    current_start, current_end = intervals[0]
+    for start, end in intervals[1:]:
+        if start <= current_end:
+            current_end = max(current_end, end)
+            continue
+        coverage += max(0.0, current_end - current_start)
+        current_start, current_end = start, end
+    coverage += max(0.0, current_end - current_start)
+    return max(0, int(round(coverage * 1000)))
+
+
+def _steps_with_unobserved_gaps(trace: SchoolTrace) -> list[SchoolTraceStep]:
+    combined = list(trace.steps) + _unobserved_gap_steps(trace)
+    return sorted(
+        combined,
+        key=lambda step: (
+            float(step.started_at or trace.created_at or 0),
+            1 if step.name == "trace.unobserved_gap" else 0,
+        ),
+    )
+
+
+def _unobserved_gap_steps(trace: SchoolTrace) -> list[SchoolTraceStep]:
+    trace_start = float(trace.created_at or 0)
+    trace_end = _trace_end_time(trace)
+    if not trace_start or trace_end <= trace_start:
+        return []
+    intervals: list[tuple[float, float, SchoolTraceStep]] = []
+    for step in trace.steps:
+        start = float(step.started_at or 0)
+        end = float(step.ended_at or 0)
+        if not start:
+            continue
+        if end < start:
+            end = start
+        intervals.append((start, end, step))
+    intervals.sort(key=lambda item: (item[0], item[1]))
+    gaps: list[SchoolTraceStep] = []
+    cursor = trace_start
+    previous_name = "trace.start"
+    for start, end, step in intervals:
+        if start > cursor:
+            gap_ms = int(round((start - cursor) * 1000))
+            if gap_ms >= _MIN_UNOBSERVED_GAP_MS:
+                gaps.append(
+                    SchoolTraceStep(
+                        name="trace.unobserved_gap",
+                        input={
+                            "previous_step": previous_name,
+                            "next_step": step.name,
+                            "reason": "time_between_recorded_steps",
+                        },
+                        output={"duration_ms": gap_ms},
+                        duration_ms=gap_ms,
+                        started_at=cursor,
+                        ended_at=start,
+                    )
+                )
+        if end >= cursor:
+            cursor = end
+            previous_name = step.name
+    if trace_end > cursor:
+        gap_ms = int(round((trace_end - cursor) * 1000))
+        if gap_ms >= _MIN_UNOBSERVED_GAP_MS:
+            gaps.append(
+                SchoolTraceStep(
+                    name="trace.unobserved_gap",
+                    input={
+                        "previous_step": previous_name,
+                        "next_step": "trace.end",
+                        "reason": "time_after_last_recorded_step",
+                    },
+                    output={"duration_ms": gap_ms},
+                    duration_ms=gap_ms,
+                    started_at=cursor,
+                    ended_at=trace_end,
+                )
+            )
+    return gaps
 
 
 def _final_answer_text(trace: SchoolTrace) -> str:

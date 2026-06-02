@@ -19,7 +19,16 @@ def record_langgraph_event_as_trace_step(trace: Any, event: dict[str, Any], *, p
     if not isinstance(event, dict):
         return
     kind = str(event.get("event") or "").strip()
-    if kind in {"on_chat_model_start", "on_chat_model_stream", "on_chat_model_end", "on_chat_model_error"}:
+    if kind in {
+        "on_chat_model_start",
+        "on_chat_model_stream",
+        "on_chat_model_end",
+        "on_chat_model_error",
+        "on_llm_start",
+        "on_llm_stream",
+        "on_llm_end",
+        "on_llm_error",
+    }:
         _record_chat_model_event(trace, event, prefix=prefix)
         return
     if kind not in {"on_tool_start", "on_tool_end", "on_tool_error"}:
@@ -48,7 +57,7 @@ def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) 
         return
     runs = _active_llm_runs(trace)
     now = time.perf_counter()
-    if kind == "on_chat_model_start":
+    if kind in {"on_chat_model_start", "on_llm_start"}:
         runs[run_id] = {
             "started_at": now,
             "started_wall_at": time.time(),
@@ -58,13 +67,13 @@ def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) 
         }
         return
     state = runs.get(run_id)
-    if kind == "on_chat_model_stream":
+    if kind in {"on_chat_model_stream", "on_llm_stream"}:
         if state is not None:
             state["stream_chunk_count"] = int(state.get("stream_chunk_count") or 0) + 1
             if state.get("first_token_at") is None:
                 state["first_token_at"] = now
         return
-    if kind in {"on_chat_model_end", "on_chat_model_error"}:
+    if kind in {"on_chat_model_end", "on_chat_model_error", "on_llm_end", "on_llm_error"}:
         state = runs.pop(run_id, None) or {
             "started_at": now,
             "first_token_at": None,
@@ -87,7 +96,7 @@ def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) 
         error = _truncate(str(data.get("error") or ""))
         step = SchoolTraceStep(
             name=f"{prefix}.llm",
-            status="error" if kind == "on_chat_model_error" else "ok",
+            status="error" if kind.endswith("_error") else "ok",
             input=state.get("input") if isinstance(state.get("input"), dict) else {},
             output=output,
             error=error,
@@ -117,7 +126,7 @@ def _chat_model_input_payload(event: dict[str, Any]) -> dict[str, Any]:
         event.get("name"),
     )
     return {
-        "event": "on_chat_model_start",
+        "event": str(event.get("event") or "on_chat_model_start"),
         "run_id": str(event.get("run_id") or ""),
         "model_name": model_name,
         "provider": _first_text(metadata.get("ls_provider"), event.get("name")),

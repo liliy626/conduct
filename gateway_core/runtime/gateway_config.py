@@ -25,6 +25,7 @@ import yaml
 from fastapi import HTTPException
 from langchain_openai import ChatOpenAI
 from gateway_core.infra.api_keys import (
+    GatewayApiKeyRecord,
     api_key_db_enabled,
     current_api_key_record,
     is_admin_record,
@@ -343,11 +344,76 @@ def _require_gateway_auth(authorization: Optional[str]) -> str:
             raise HTTPException(status_code=401, detail="disabled gateway api key")
         set_current_api_key_record(record)
         return token
-    return require_gateway_auth(authorization, _get_gateway_keys())
+    token = require_gateway_auth(authorization, _get_gateway_keys())
+    set_current_api_key_record(_env_gateway_api_key_record(token))
+    return token
 
 
 def _current_gateway_api_key_record():
     return current_api_key_record()
+
+
+def _env_gateway_api_key_record(token: str) -> GatewayApiKeyRecord | None:
+    clean_token = str(token or "").strip()
+    if not clean_token:
+        return None
+    school_map = _parse_env_key_value_map(os.getenv("GATEWAY_KEY_SCHOOL_MAP", ""))
+    policy_map = _parse_env_key_value_map(os.getenv("GATEWAY_KEY_POLICY_MAP", ""))
+    if clean_token in policy_map:
+        return GatewayApiKeyRecord(
+            api_key=clean_token,
+            key_prefix=clean_token[:8],
+            key_type="policy",
+            school_id="",
+            schema_name=str(policy_map.get(clean_token) or "official_policy").strip() or "official_policy",
+            display_name=str(policy_map.get(clean_token) or "政策助手").strip() or "政策助手",
+            enabled=True,
+            rate_limit_rpm=_env_key_rate_limit_rpm(),
+        )
+    display_name = str(school_map.get(clean_token) or "").strip()
+    if not display_name:
+        return None
+    school_id_map = _parse_env_key_value_map(os.getenv("GATEWAY_KEY_SCHOOL_ID_MAP", ""))
+    schema_map = _parse_env_key_value_map(os.getenv("GATEWAY_KEY_SCHEMA_MAP", ""))
+    school_id, schema_name = _default_school_identity(clean_token, display_name)
+    return GatewayApiKeyRecord(
+        api_key=clean_token,
+        key_prefix=clean_token[:8],
+        key_type="school",
+        school_id=str(school_id_map.get(clean_token) or school_id).strip(),
+        schema_name=str(schema_map.get(clean_token) or schema_name).strip(),
+        display_name=display_name,
+        enabled=True,
+        rate_limit_rpm=_env_key_rate_limit_rpm(),
+    )
+
+
+def _parse_env_key_value_map(raw: str) -> dict[str, str]:
+    output: dict[str, str] = {}
+    for item in str(raw or "").split(";"):
+        if "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        clean_key = key.strip()
+        if clean_key:
+            output[clean_key] = value.strip()
+    return output
+
+
+def _default_school_identity(token: str, display_name: str) -> tuple[str, str]:
+    text = f"{token} {display_name}"
+    if "美兰湖" in text or token in {"key_a", "key_a_raw", "key_a_ddl"}:
+        return "sch_zx_mlh", "mlh"
+    if "第二轻工业" in text or "上大附中" in text or token in {"key_b", "key_b_raw", "key_b_ddl"}:
+        return "sch_zx_sdfz", "sdfz"
+    return display_name or token, os.getenv("DEFAULT_SCHOOL_SCHEMA", "").strip()
+
+
+def _env_key_rate_limit_rpm() -> int:
+    try:
+        return max(1, int(os.getenv("GATEWAY_ENV_KEY_RATE_LIMIT_RPM", "200") or "200"))
+    except Exception:
+        return 200
 
 
 def _current_gateway_key_is_admin() -> bool:

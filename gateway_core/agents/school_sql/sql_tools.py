@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import datetime as _dt
 import hashlib
 import json
 import os
 import re
 import threading
+import time
 from typing import Any, Callable
 
 from langchain_core.tools import StructuredTool
@@ -628,7 +630,12 @@ class DDLReactTools:
                 max_chars_per_doc=_ddl_max_chars_per_doc(),
             )
             self._remember_ddl_context(result, query=clean_query)
+            coverage_started = time.perf_counter()
             coverage_map = self._probe_candidate_evidence_map(result.table_refs, query=clean_query)
+            timings_ms = {
+                **(result.timings_ms or {}),
+                "coverage_probe_ms": round((time.perf_counter() - coverage_started) * 1000, 3),
+            }
             payload = {
                 "source": "ddl_vector_documents",
                 "schema_name": result.schema_name,
@@ -636,6 +643,8 @@ class DDLReactTools:
                 "doc_count": len(result.documents),
                 "table_refs": result.table_refs,
                 "candidate_evidence_map": coverage_map,
+                "timings_ms": timings_ms,
+                "recall_compare": result.recall_compare,
                 "from_cache": result.from_cache,
                 "error": result.error,
                 "documents": [
@@ -647,8 +656,8 @@ class DDLReactTools:
                     for item in result.documents
                 ],
                 "next_step_hint": (
-                    "先阅读 candidate_evidence_map：优先选择 current_period_count>0 或 latest_time 最新的活跃表；"
-                    "对 likely_stale/empty 的旧表不要直接下结论为 0。"
+                    "先阅读 candidate_evidence_map：优先选择 has_current_period_data=true 或 latest_time 最新的活跃表；"
+                    "对 stale/empty 的旧表不要直接下结论为 0。"
                     "再从 table_refs 中选择相关表，调用 inspect_table_schema 获取精确字段；不要把无关表结构继续带入后续推理。"
                 ),
             }
@@ -667,6 +676,8 @@ class DDLReactTools:
                     "error": result.error,
                     "documents": payload["documents"],
                     "candidate_evidence_map": coverage_map,
+                    "timings_ms": timings_ms,
+                    "recall_compare": result.recall_compare,
                 },
             )
         return json.dumps(payload, ensure_ascii=False, default=str)
@@ -1239,6 +1250,8 @@ class DDLReactTools:
                 "doc_count": len(result.documents),
                 "from_cache": result.from_cache,
                 "error": result.error,
+                "timings_ms": result.timings_ms,
+                "recall_compare": result.recall_compare,
             }
         )
 
@@ -1250,15 +1263,21 @@ class DDLReactTools:
     def _probe_candidate_evidence_map(self, refs: list[str], *, query: str) -> list[dict[str, Any]]:
         if not _coverage_probe_enabled():
             return []
-        out: list[dict[str, Any]] = []
+        candidates: list[str] = []
         seen: set[str] = set()
         for ref in refs[:_coverage_probe_max_tables()]:
             clean = str(ref or "").strip()
             if not clean or _normalize_ref(clean) in seen:
                 continue
             seen.add(_normalize_ref(clean))
-            out.append(self._probe_single_candidate_table(clean, query=query))
-        return out
+            candidates.append(clean)
+        if not candidates:
+            return []
+        max_workers = min(len(candidates), _coverage_probe_max_workers())
+        if max_workers <= 1:
+            return [self._probe_single_candidate_table(ref, query=query) for ref in candidates]
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            return list(executor.map(lambda ref: self._probe_single_candidate_table(ref, query=query), candidates))
 
     def _probe_single_candidate_table(self, ref: str, *, query: str) -> dict[str, Any]:
         table_ref = _school_table_ref(ref, schema_name=self.package_index.source_schema)
@@ -1275,45 +1294,53 @@ class DDLReactTools:
             )
             time_column = _pick_probe_time_column(columns)
             quoted_table = _quote_table_ref(schema_name, table_name)
+            exists_sql = f"SELECT 1 AS has_rows FROM {quoted_table} LIMIT 1"
+            exists_rows = _execute_query(psycopg_module=self.psycopg_module, dsn=self.dsn, sql=exists_sql, params=[])
+            if not exists_rows:
+                return {
+                    **base_payload,
+                    "status": "empty",
+                    "has_rows": False,
+                    "time_field": time_column,
+                    "latest_time": None,
+                    "current_period": "",
+                    "has_current_period_data": False,
+                }
             if time_column:
                 period = _probe_period(query)
                 quoted_time = _quote_ident(time_column)
                 sql = (
-                    f"SELECT COUNT(*)::bigint AS total_count, "
-                    f"MAX({quoted_time}) AS latest_time, "
-                    f"COUNT(*) FILTER (WHERE {quoted_time} >= {period['start_sql']} "
-                    f"AND {quoted_time} < {period['end_sql']})::bigint AS current_period_count "
-                    f"FROM {quoted_table}"
+                    f"SELECT {quoted_time} AS latest_time "
+                    f"FROM {quoted_table} "
+                    f"WHERE {quoted_time} IS NOT NULL "
+                    f"ORDER BY {quoted_time} DESC NULLS LAST "
+                    f"LIMIT 1"
                 )
                 rows = _execute_query(psycopg_module=self.psycopg_module, dsn=self.dsn, sql=sql, params=[])
                 row = rows[0] if rows else {}
-                total_count = int(row.get("total_count") or 0)
-                current_period_count = int(row.get("current_period_count") or 0)
                 latest_time = row.get("latest_time")
+                has_current_period_data = _latest_time_in_probe_period(latest_time, period)
                 return {
                     **base_payload,
                     "status": _probe_status(
-                        total_count=total_count,
-                        current_period_count=current_period_count,
+                        has_rows=True,
+                        has_current_period_data=has_current_period_data,
                         latest_time=latest_time,
                     ),
-                    "total_count": total_count,
+                    "has_rows": True,
                     "time_field": time_column,
                     "latest_time": latest_time,
                     "current_period": period["label"],
-                    "current_period_count": current_period_count,
+                    "has_current_period_data": has_current_period_data,
                 }
-            sql = f"SELECT COUNT(*)::bigint AS total_count FROM {quoted_table}"
-            rows = _execute_query(psycopg_module=self.psycopg_module, dsn=self.dsn, sql=sql, params=[])
-            total_count = int((rows[0] if rows else {}).get("total_count") or 0)
             return {
                 **base_payload,
-                "status": "no_time_field" if total_count else "empty",
-                "total_count": total_count,
+                "status": "no_time_field",
+                "has_rows": True,
                 "time_field": "",
                 "latest_time": None,
                 "current_period": "",
-                "current_period_count": None,
+                "has_current_period_data": False,
             }
         except Exception as exc:
             return {**base_payload, "status": "probe_failed", "error": _truncate_text(str(exc), 240)}
@@ -1522,6 +1549,13 @@ def _coverage_probe_max_tables() -> int:
         return 12
 
 
+def _coverage_probe_max_workers() -> int:
+    try:
+        return max(1, min(int(os.getenv("SCHOOL_EVIDENCE_COVERAGE_MAX_WORKERS", "4") or "4"), 12))
+    except Exception:
+        return 4
+
+
 def _pick_probe_time_column(columns: list[dict[str, Any]]) -> str:
     typed: list[dict[str, Any]] = []
     for column in columns:
@@ -1577,44 +1611,79 @@ def _probe_time_name_score(name: str) -> int:
 
 def _probe_period(query: str) -> dict[str, str]:
     text = str(query or "")
+    if any(token in text for token in ["今天", "今日", "当天"]):
+        return {"label": "today"}
+    if any(token in text for token in ["昨天", "昨日"]):
+        return {"label": "yesterday"}
     if "上周" in text:
-        return {
-            "label": "last_week",
-            "start_sql": "date_trunc('week', CURRENT_DATE) - interval '1 week'",
-            "end_sql": "date_trunc('week', CURRENT_DATE)",
-        }
+        return {"label": "last_week"}
     if "本周" in text or "这周" in text:
-        return {
-            "label": "current_week",
-            "start_sql": "date_trunc('week', CURRENT_DATE)",
-            "end_sql": "date_trunc('week', CURRENT_DATE) + interval '1 week'",
-        }
+        return {"label": "current_week"}
     if "上月" in text or "上个月" in text:
-        return {
-            "label": "last_month",
-            "start_sql": "date_trunc('month', CURRENT_DATE) - interval '1 month'",
-            "end_sql": "date_trunc('month', CURRENT_DATE)",
-        }
-    return {
-        "label": "current_month",
-        "start_sql": "date_trunc('month', CURRENT_DATE)",
-        "end_sql": "date_trunc('month', CURRENT_DATE) + interval '1 month'",
-    }
+        return {"label": "last_month"}
+    return {"label": "current_month"}
 
 
-def _probe_status(*, total_count: int, current_period_count: int, latest_time: Any) -> str:
-    if total_count <= 0:
+def _probe_status(*, has_rows: bool, has_current_period_data: bool, latest_time: Any) -> str:
+    if not has_rows:
         return "empty"
-    if current_period_count > 0:
-        return "active_current_period"
     if latest_time is None:
-        return "no_latest_time"
-    latest_text = str(latest_time)
-    current_month = _dt.date.today().strftime("%Y-%m")
-    if latest_text.startswith(current_month):
-        return "recent_no_period_match"
-    return "likely_stale_or_no_current_period"
+        return "no_time_value"
+    if has_current_period_data:
+        return "active_current_period"
+    return "stale"
 
+
+def _latest_time_in_probe_period(latest_time: Any, period: dict[str, str]) -> bool:
+    latest_date = _probe_date_value(latest_time)
+    if latest_date is None:
+        return False
+    today = _dt.date.today()
+    label = str(period.get("label") or "")
+    if label == "today":
+        return latest_date == today
+    if label == "yesterday":
+        return latest_date == today - _dt.timedelta(days=1)
+    if label == "current_week":
+        start = today - _dt.timedelta(days=today.weekday())
+        return start <= latest_date < start + _dt.timedelta(days=7)
+    if label == "last_week":
+        current_week_start = today - _dt.timedelta(days=today.weekday())
+        return current_week_start - _dt.timedelta(days=7) <= latest_date < current_week_start
+    if label == "last_month":
+        first_this_month = today.replace(day=1)
+        last_month_last_day = first_this_month - _dt.timedelta(days=1)
+        first_last_month = last_month_last_day.replace(day=1)
+        return first_last_month <= latest_date < first_this_month
+    if label == "current_month":
+        return latest_date.year == today.year and latest_date.month == today.month
+    return False
+
+
+def _probe_date_value(value: Any) -> _dt.date | None:
+    if value is None:
+        return None
+    if isinstance(value, _dt.datetime):
+        if value.tzinfo is not None:
+            return value.astimezone().date()
+        return value.date()
+    if isinstance(value, _dt.date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = _dt.datetime.fromisoformat(normalized)
+        if parsed.tzinfo is not None:
+            return parsed.astimezone().date()
+        return parsed.date()
+    except Exception:
+        pass
+    try:
+        return _dt.date.fromisoformat(text[:10])
+    except Exception:
+        return None
 
 def _sample_select_columns(
     *,

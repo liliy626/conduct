@@ -44,22 +44,37 @@ class ContractPlanner:
             conversation_context=str(conversation_context or ""),
             available_tools=available_tool_names,
         )
+        structured_error = ""
         try:
             with_structured_output = getattr(self.model, "with_structured_output", None)
             if callable(with_structured_output):
-                structured = with_structured_output(PerTurnContractPlan)
-                result = structured.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
-                return _coerce_plan(result, available_tool_names)
+                try:
+                    structured = with_structured_output(PerTurnContractPlan)
+                    result = structured.invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
+                    return _coerce_plan(result, available_tool_names)
+                except Exception as exc:
+                    structured_error = f"{type(exc).__name__}: {_safe_error_text(exc)}"
             invoke = getattr(self.model, "invoke", None)
             if callable(invoke):
                 result = invoke([SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)])
-                return _coerce_plan(_extract_json_payload(result), available_tool_names)
+                plan = _coerce_plan(_extract_json_payload(result), available_tool_names)
+                if structured_error and not plan.reason:
+                    return PerTurnContractPlan(
+                        required_outputs=plan.required_outputs,
+                        allowed_tools=plan.allowed_tools,
+                        answer_mode=plan.answer_mode,
+                        reason=f"plain_json_fallback_after_structured_error: {structured_error}",
+                    )
+                return plan
         except Exception as exc:
+            reason = f"contract planner unavailable: {type(exc).__name__}: {_safe_error_text(exc)}"
+            if structured_error:
+                reason = f"{reason}; structured_error={structured_error}"
             return PerTurnContractPlan(
                 required_outputs=[],
                 allowed_tools=[],
                 answer_mode="data",
-                reason=f"contract planner unavailable: {type(exc).__name__}",
+                reason=reason,
             )
         return PerTurnContractPlan(required_outputs=[], allowed_tools=[], answer_mode="data", reason="contract planner unavailable")
 
@@ -124,6 +139,13 @@ def _extract_json_payload(value: Any) -> dict[str, Any]:
         return {}
 
 
+def _safe_error_text(exc: Exception) -> str:
+    text = str(exc or "").strip()
+    if not text:
+        return ""
+    return text[:500]
+
+
 def _dedupe(values: Iterable[Any]) -> list[str]:
     seen: set[str] = set()
     output: list[str] = []
@@ -134,4 +156,3 @@ def _dedupe(values: Iterable[Any]) -> list[str]:
         seen.add(text)
         output.append(text)
     return output
-

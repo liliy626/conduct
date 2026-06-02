@@ -91,12 +91,12 @@ def _load_ddl_vector_datasets(cur: Any, *, schema_name: str) -> list[SchoolDatas
 
     datasets: list[SchoolDatasetIndex] = []
     seen: set[str] = set()
+    candidates: list[tuple[str, str, str, dict[str, Any], str]] = []
     for table_name_raw, object_name_raw, object_type_raw, content_raw, metadata_raw, _column_count_raw in rows:
         table_name = str(table_name_raw or object_name_raw or "").strip()
         if not table_name or table_name in seen or _is_metadata_table(table_name):
             continue
         seen.add(table_name)
-        fields = _load_fields(cur, schema_name=schema_name, table_name=table_name)
         metadata = _metadata_dict(metadata_raw)
         description = _ddl_vector_description(
             table_name=table_name,
@@ -104,13 +104,20 @@ def _load_ddl_vector_datasets(cur: Any, *, schema_name: str) -> list[SchoolDatas
             content=str(content_raw or ""),
             metadata=metadata,
         )
+        candidates.append((table_name, str(object_type_raw or "TABLE"), description, metadata, str(content_raw or "")))
+    fields_by_table = _load_fields_many(
+        cur,
+        schema_name=schema_name,
+        table_names=[item[0] for item in candidates],
+    )
+    for table_name, object_type, description, _metadata, _content in candidates:
         datasets.append(
             _dataset_from_table(
                 schema_name=schema_name,
                 table_name=table_name,
-                table_type=str(object_type_raw or "TABLE"),
+                table_type=object_type,
                 comment=description,
-                fields=fields,
+                fields=fields_by_table.get(table_name, []),
                 raw_source="ddl_vector_documents",
             )
         )
@@ -137,18 +144,25 @@ def _load_information_schema_datasets(cur: Any, *, schema_name: str) -> list[Sch
     )
     table_rows = cur.fetchall()
     datasets: list[SchoolDatasetIndex] = []
+    candidates: list[tuple[str, str, str]] = []
     for table_name_raw, table_type_raw, comment_raw in table_rows:
         table_name = str(table_name_raw or "").strip()
         if not table_name or _is_metadata_table(table_name):
             continue
-        fields = _load_fields(cur, schema_name=schema_name, table_name=table_name)
+        candidates.append((table_name, str(table_type_raw or ""), str(comment_raw or "")))
+    fields_by_table = _load_fields_many(
+        cur,
+        schema_name=schema_name,
+        table_names=[item[0] for item in candidates],
+    )
+    for table_name, table_type, comment in candidates:
         datasets.append(
             _dataset_from_table(
                 schema_name=schema_name,
                 table_name=table_name,
-                table_type=str(table_type_raw or ""),
-                comment=str(comment_raw or ""),
-                fields=fields,
+                table_type=table_type,
+                comment=comment,
+                fields=fields_by_table.get(table_name, []),
                 raw_source="information_schema",
             )
         )
@@ -156,9 +170,17 @@ def _load_information_schema_datasets(cur: Any, *, schema_name: str) -> list[Sch
 
 
 def _load_fields(cur: Any, *, schema_name: str, table_name: str) -> list[SchoolFieldIndex]:
+    return _load_fields_many(cur, schema_name=schema_name, table_names=[table_name]).get(table_name, [])
+
+
+def _load_fields_many(cur: Any, *, schema_name: str, table_names: list[str]) -> dict[str, list[SchoolFieldIndex]]:
+    clean_names = [str(item or "").strip() for item in table_names if str(item or "").strip()]
+    if not clean_names:
+        return {}
     cur.execute(
         """
-        SELECT c.column_name,
+        SELECT c.table_name,
+               c.column_name,
                c.data_type,
                c.udt_name,
                c.is_nullable,
@@ -170,23 +192,28 @@ def _load_fields(cur: Any, *, schema_name: str, table_name: str) -> list[SchoolF
           ON pn.oid = pc.relnamespace
          AND pn.nspname = c.table_schema
         WHERE c.table_schema = %s
-          AND c.table_name = %s
-        ORDER BY c.ordinal_position
+          AND c.table_name = ANY(%s)
+        ORDER BY c.table_name, c.ordinal_position
         LIMIT %s
         """,
-        [schema_name, table_name, _max_fields_per_table()],
+        [schema_name, clean_names, _max_fields_per_table() * max(1, len(clean_names))],
     )
-    fields: list[SchoolFieldIndex] = []
-    dataset_id = _dataset_id(table_name)
-    for column_name_raw, data_type_raw, udt_name_raw, _nullable_raw, comment_raw in cur.fetchall():
+    output: dict[str, list[SchoolFieldIndex]] = {name: [] for name in clean_names}
+    for table_name_raw, column_name_raw, data_type_raw, udt_name_raw, _nullable_raw, comment_raw in cur.fetchall():
+        table_name = str(table_name_raw or "").strip()
+        if not table_name or table_name not in output:
+            continue
+        if len(output[table_name]) >= _max_fields_per_table():
+            continue
         column_name = str(column_name_raw or "").strip()
         if not column_name:
             continue
+        dataset_id = _dataset_id(table_name)
         data_type = str(data_type_raw or udt_name_raw or "").strip()
         label = str(comment_raw or "").strip() or column_name
         role = _infer_role(column_name=column_name, data_type=data_type)
         sensitive = _is_sensitive_field(column_name, label)
-        fields.append(
+        output[table_name].append(
             SchoolFieldIndex(
                 field_id=f"{dataset_id}.{column_name}",
                 source_field=column_name,
@@ -199,7 +226,7 @@ def _load_fields(cur: Any, *, schema_name: str, table_name: str) -> list[SchoolF
                 sensitive=sensitive,
             )
         )
-    return fields
+    return output
 
 
 def _dataset_from_table(

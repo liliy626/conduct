@@ -129,8 +129,16 @@ async def stream_school_sql_agent_native(
                 step,
                 {
                     "input": {"question": question, "schema_name": schema_index.source_schema},
-                    "decision": {"source": _schema_index_source(schema_index), "dataset_count": len(schema_index.datasets)},
-                    "output": _index_trace_payload(schema_index, source=_schema_index_source(schema_index)),
+                    "decision": {
+                        "source": _schema_index_source(schema_index),
+                        "dataset_count": len(schema_index.datasets),
+                        "selection_scope": "catalog_loaded_not_question_filtered",
+                    },
+                    "output": _index_trace_payload(
+                        schema_index,
+                        source=_schema_index_source(schema_index),
+                        include_datasets=False,
+                    ),
                     "error": None,
                 },
             )
@@ -537,7 +545,7 @@ def _build_agent_schema_index(
             dsn=dsn,
             psycopg_module=psycopg_module,
         )
-        set_step_output(step, _index_trace_payload(schema_index, source=_schema_index_source(schema_index)))
+        set_step_output(step, _index_trace_payload(schema_index, source=_schema_index_source(schema_index), include_datasets=True))
         return schema_index
 
 
@@ -550,17 +558,28 @@ def _require_school_api_key_record() -> Any:
     return record
 
 
-def _index_trace_payload(schema_index: Any, *, source: str) -> dict[str, Any]:
+def _index_trace_payload(schema_index: Any, *, source: str, include_datasets: bool = False) -> dict[str, Any]:
     dataset_limit = _trace_int_env("GATEWAY_TRACE_METADATA_DATASET_LIMIT", "SCHOOL_TRACE_METADATA_DATASET_LIMIT", 50)
     field_limit = _trace_int_env("GATEWAY_TRACE_METADATA_FIELD_LIMIT", "SCHOOL_TRACE_METADATA_FIELD_LIMIT", 30)
-    return {
+    payload = {
         "source": source,
         "school_id": schema_index.school_id,
         "school_name": schema_index.school_name,
         "schema_name": schema_index.source_schema,
         "datasets_count": len(schema_index.datasets),
         "fields_count": sum(len(dataset.fields) for dataset in schema_index.datasets),
-        "datasets": [
+        "sample_datasets": [
+            {
+                "dataset_id": dataset.dataset_id,
+                "label": dataset.label,
+                "source_view": dataset.source_view,
+                "fields_count": len(dataset.fields),
+            }
+            for dataset in schema_index.datasets[:20]
+        ],
+    }
+    if include_datasets:
+        payload["datasets"] = [
             {
                 "dataset_id": dataset.dataset_id,
                 "label": dataset.label,
@@ -577,17 +596,8 @@ def _index_trace_payload(schema_index: Any, *, source: str) -> dict[str, Any]:
                 ],
             }
             for dataset in schema_index.datasets[:dataset_limit]
-        ],
-        "sample_datasets": [
-            {
-                "dataset_id": dataset.dataset_id,
-                "label": dataset.label,
-                "source_view": dataset.source_view,
-                "fields_count": len(dataset.fields),
-            }
-            for dataset in schema_index.datasets[:20]
-        ],
-    }
+        ]
+    return payload
 
 
 def _business_trace_fields(fields: list[Any], *, limit: int) -> list[Any]:

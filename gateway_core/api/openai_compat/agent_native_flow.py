@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 from typing import Any
 
 from gateway_core.agents.streaming.context import set_agent_stream_process_requested
+from gateway_core.api.openai_compat.response_composer import ResponseComposer
 from gateway_core.infra.postgres_dsn import postgres_dsn
 from gateway_core.runtime import runtime_context as rt
 from gateway_core.conversation.session_memory import remember_conversation_turn
@@ -33,17 +33,6 @@ def apply_agent_stream_process_header(request: Any) -> bool:
     enabled = header.strip().lower() in {"1", "true", "yes", "on"}
     set_agent_stream_process_requested(enabled)
     return enabled
-
-
-def _build_reasoning_stream_chunk(*, model_id: str, completion_id: str, created: int, text: str) -> str:
-    payload = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model_id,
-        "choices": [{"index": 0, "delta": {"reasoning_content": text}, "finish_reason": None}],
-    }
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def resolve_agent_native_model(default_model: Any) -> Any:
@@ -95,6 +84,12 @@ async def run_agent_native_stream(
     process_chunks: list[str] = []
     openwebui_sources: list[dict[str, Any]] = []
     markdown_filter = _VisualMarkdownStreamFilter()
+    composer = ResponseComposer(
+        model_id=spec.model_id,
+        completion_id=completion_id,
+        now_ts=pipeline_ctx.now_ts_fn,
+        include_role=False,
+    )
 
     def _chunk(text: str) -> str:
         nonlocal first_token_ms
@@ -104,7 +99,8 @@ async def run_agent_native_stream(
         if first_token_ms is None:
             first_token_ms = response_tools.elapsed_ms()
         answer_chunks.append(text)
-        return runtime_response_fns.stream_chunk(spec.model_id, completion_id, text)
+        chunks = composer.compose_text_delta(text, field="content")
+        return chunks[0] if chunks else ""
 
     def _process_chunk(text: str) -> str:
         nonlocal first_token_ms
@@ -114,13 +110,10 @@ async def run_agent_native_stream(
         mode = _env_value("SCHOOL_AGENT_NATIVE_PROCESS_DELTA_MODE", "TENANT_AGENT_NATIVE_PROCESS_DELTA_MODE", "reasoning_content").lower()
         if mode in {"content", "plain"}:
             answer_chunks.append(text)
-            return runtime_response_fns.stream_chunk(spec.model_id, completion_id, text)
-        return _build_reasoning_stream_chunk(
-            model_id=spec.model_id,
-            completion_id=completion_id,
-            created=pipeline_ctx.now_ts_fn(),
-            text=text,
-        )
+            chunks = composer.compose_text_delta(text, field="content")
+            return chunks[0] if chunks else ""
+        chunks = composer.compose_text_delta(text, field="reasoning_content")
+        return chunks[0] if chunks else ""
 
     response_tools.log_monitor_event(
         {
@@ -135,6 +128,7 @@ async def run_agent_native_stream(
             "usage": rt._zero_usage(),
         }
     )
+    yield _process_chunk("正在理解问题并准备检索学校数据...\n")
     try:
         async for event in stream_school_sql_agent_native(
             question=effective_question,
@@ -154,7 +148,8 @@ async def run_agent_native_stream(
                 sources = event.get("sources") if isinstance(event.get("sources"), list) else []
                 if sources:
                     _merge_openwebui_sources(openwebui_sources, sources)
-                    yield runtime_response_fns.stream_chunk(spec.model_id, completion_id, "", sources=sources)
+                    for chunk in composer.compose_sources_delta(sources):
+                        yield chunk
                 continue
             text = str(event.get("text") or "")
             if text:
@@ -187,7 +182,8 @@ async def run_agent_native_stream(
         if first_token_ms is None:
             first_token_ms = response_tools.elapsed_ms()
         answer_chunks.append(flushed)
-        yield runtime_response_fns.stream_chunk(spec.model_id, completion_id, flushed)
+        for chunk in composer.compose_text_delta(flushed, field="content"):
+            yield chunk
 
     response_tools.log_monitor_event(
         {
@@ -236,6 +232,12 @@ async def run_policy_only_agent_native_stream(
     process_chunks: list[str] = []
     openwebui_sources: list[dict[str, Any]] = []
     markdown_filter = _VisualMarkdownStreamFilter()
+    composer = ResponseComposer(
+        model_id=spec.model_id,
+        completion_id=completion_id,
+        now_ts=pipeline_ctx.now_ts_fn,
+        include_role=False,
+    )
 
     def _chunk(text: str) -> str:
         nonlocal first_token_ms
@@ -245,7 +247,8 @@ async def run_policy_only_agent_native_stream(
         if first_token_ms is None:
             first_token_ms = response_tools.elapsed_ms()
         answer_chunks.append(text)
-        return runtime_response_fns.stream_chunk(spec.model_id, completion_id, text)
+        chunks = composer.compose_text_delta(text, field="content")
+        return chunks[0] if chunks else ""
 
     def _process_chunk(text: str) -> str:
         nonlocal first_token_ms
@@ -255,13 +258,10 @@ async def run_policy_only_agent_native_stream(
         mode = _env_value("SCHOOL_AGENT_NATIVE_PROCESS_DELTA_MODE", "TENANT_AGENT_NATIVE_PROCESS_DELTA_MODE", "reasoning_content").lower()
         if mode in {"content", "plain"}:
             answer_chunks.append(text)
-            return runtime_response_fns.stream_chunk(spec.model_id, completion_id, text)
-        return _build_reasoning_stream_chunk(
-            model_id=spec.model_id,
-            completion_id=completion_id,
-            created=pipeline_ctx.now_ts_fn(),
-            text=text,
-        )
+            chunks = composer.compose_text_delta(text, field="content")
+            return chunks[0] if chunks else ""
+        chunks = composer.compose_text_delta(text, field="reasoning_content")
+        return chunks[0] if chunks else ""
 
     response_tools.log_monitor_event(
         {
@@ -276,6 +276,7 @@ async def run_policy_only_agent_native_stream(
             "usage": rt._zero_usage(),
         }
     )
+    yield _process_chunk("正在理解问题并准备检索政策证据...\n")
     try:
         async for event in stream_policy_only_agent_native(
             question=effective_question,
@@ -289,7 +290,8 @@ async def run_policy_only_agent_native_stream(
                 sources = event.get("sources") if isinstance(event.get("sources"), list) else []
                 if sources:
                     _merge_openwebui_sources(openwebui_sources, sources)
-                    yield runtime_response_fns.stream_chunk(spec.model_id, completion_id, "", sources=sources)
+                    for chunk in composer.compose_sources_delta(sources):
+                        yield chunk
                 continue
             text = str(event.get("text") or "")
             if text:
@@ -322,7 +324,8 @@ async def run_policy_only_agent_native_stream(
         if first_token_ms is None:
             first_token_ms = response_tools.elapsed_ms()
         answer_chunks.append(flushed)
-        yield runtime_response_fns.stream_chunk(spec.model_id, completion_id, flushed)
+        for chunk in composer.compose_text_delta(flushed, field="content"):
+            yield chunk
 
     response_tools.log_monitor_event(
         {

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import hashlib
 import json
 import os
 import re
+import time
 from typing import Any, Callable
 
 from gateway_core.infra.db_pool import connect_db
@@ -43,6 +45,8 @@ class RetrievedDDLContext:
     from_cache: bool = False
     cache_age_seconds: float = 0.0
     error: str = ""
+    timings_ms: dict[str, float] = field(default_factory=dict)
+    recall_compare: dict[str, Any] = field(default_factory=dict)
 
 
 def retrieve_lean_ddl_context(
@@ -81,9 +85,12 @@ def retrieve_lean_ddl_context(
                 from_cache=True,
                 cache_age_seconds=hit.age_seconds,
                 error=hit.value.error,
+                timings_ms=hit.value.timings_ms,
+                recall_compare=hit.value.recall_compare,
             )
 
     try:
+        timings_ms: dict[str, float] = {}
         with connect_db(psycopg_module, dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute("SET statement_timeout = 3000", [])
@@ -95,61 +102,88 @@ def retrieve_lean_ddl_context(
                     table_name=clean_vector_table,
                     column_name=embedding_col,
                 )
-                vector = _call_embedding_fn(embedding_fn, clean_question, dimensions=vector_dim)
-                if not vector:
-                    return RetrievedDDLContext(source="schema_ddl_vector", schema_name=clean_schema, error="embedding_empty")
-                if vector_dim and len(vector) != vector_dim:
-                    return RetrievedDDLContext(
-                        source="schema_ddl_vector",
-                        schema_name=clean_schema,
-                        error=f"ddl_embedding_dimension_mismatch: query={len(vector)} table={vector_dim}",
-                    )
-                candidate_limit = _candidate_fetch_limit(clean_top_k)
-                query_sql, params = _build_vector_search_sql(
-                    schema_name=clean_schema,
-                    table_name=clean_vector_table,
-                    columns=columns,
-                    vector=vector,
-                    limit=candidate_limit,
+        candidate_limit = _candidate_fetch_limit(clean_top_k)
+        keyword_sql, keyword_params = _build_keyword_search_sql(
+            schema_name=clean_schema,
+            table_name=clean_vector_table,
+            columns=columns,
+            question=clean_question,
+            limit=candidate_limit,
+        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            keyword_future = (
+                executor.submit(
+                    _execute_recall_sql,
+                    psycopg_module=psycopg_module,
+                    dsn=dsn,
+                    sql=keyword_sql,
+                    params=keyword_params,
                 )
-                if not query_sql:
-                    context = _retrieve_information_schema_ddl_context(
-                        cur,
-                        question=clean_question,
-                        schema_name=clean_schema,
-                        top_k=clean_top_k,
-                        max_chars=clean_max_chars,
-                        reason="ddl_vector_documents_missing_required_columns",
-                    )
-                    if _ddl_cache_enabled():
-                        _DDL_CACHE.set(cache_key, context)
-                    return context
-                cur.execute(query_sql, params)
-                rows = cur.fetchall()
-                keyword_sql, keyword_params = _build_keyword_search_sql(
+                if keyword_sql
+                else None
+            )
+            started = time.perf_counter()
+            vector = _call_embedding_fn(embedding_fn, clean_question, dimensions=vector_dim)
+            timings_ms["embedding_ms"] = _elapsed_ms(started)
+            if not vector:
+                return RetrievedDDLContext(
+                    source="schema_ddl_vector",
                     schema_name=clean_schema,
-                    table_name=clean_vector_table,
-                    columns=columns,
-                    question=clean_question,
-                    limit=candidate_limit,
+                    error="embedding_empty",
+                    timings_ms=timings_ms,
                 )
-                if keyword_sql:
-                    cur.execute(keyword_sql, keyword_params)
-                    rows = _merge_retrieved_rows(
-                        rows,
-                        cur.fetchall(),
-                        question=clean_question,
-                        schema_name=clean_schema,
-                        limit=max(clean_top_k, 1),
-                    )
-                else:
-                    rows = _merge_retrieved_rows(
-                        rows,
-                        [],
-                        question=clean_question,
-                        schema_name=clean_schema,
-                        limit=max(clean_top_k, 1),
-                    )
+            if vector_dim and len(vector) != vector_dim:
+                return RetrievedDDLContext(
+                    source="schema_ddl_vector",
+                    schema_name=clean_schema,
+                    error=f"ddl_embedding_dimension_mismatch: query={len(vector)} table={vector_dim}",
+                    timings_ms=timings_ms,
+                )
+            query_sql, params = _build_vector_search_sql(
+                schema_name=clean_schema,
+                table_name=clean_vector_table,
+                columns=columns,
+                vector=vector,
+                limit=candidate_limit,
+            )
+            if not query_sql:
+                with connect_db(psycopg_module, dsn) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SET statement_timeout = 3000", [])
+                        context = _retrieve_information_schema_ddl_context(
+                            cur,
+                            question=clean_question,
+                            schema_name=clean_schema,
+                            top_k=clean_top_k,
+                            max_chars=clean_max_chars,
+                            reason="ddl_vector_documents_missing_required_columns",
+                        )
+                        if _ddl_cache_enabled():
+                            _DDL_CACHE.set(cache_key, context)
+                        return context
+            rows, vector_sql_ms = _execute_recall_sql(
+                psycopg_module=psycopg_module,
+                dsn=dsn,
+                sql=query_sql,
+                params=params,
+            )
+            timings_ms["vector_sql_ms"] = vector_sql_ms
+            if keyword_future is not None:
+                keyword_rows, keyword_sql_ms = keyword_future.result()
+                timings_ms["keyword_sql_ms"] = keyword_sql_ms
+            else:
+                keyword_rows = []
+                timings_ms["keyword_sql_ms"] = 0.0
+            started = time.perf_counter()
+            recall_compare = _recall_compare(rows, keyword_rows, schema_name=clean_schema)
+            rows = _merge_retrieved_rows(
+                rows,
+                keyword_rows,
+                question=clean_question,
+                schema_name=clean_schema,
+                limit=max(clean_top_k, 1),
+            )
+            timings_ms["merge_ms"] = _elapsed_ms(started)
     except Exception as exc:
         try:
             with connect_db(psycopg_module, dsn) as conn:
@@ -201,6 +235,8 @@ def retrieve_lean_ddl_context(
         schema_name=clean_schema,
         table_refs=table_refs,
         documents=documents,
+        timings_ms=timings_ms,
+        recall_compare=recall_compare,
     )
     if _ddl_cache_enabled():
         _DDL_CACHE.set(cache_key, context)
@@ -407,6 +443,54 @@ def _load_vector_column_dimension(cur: Any, *, schema_name: str, table_name: str
         return int(match.group(1))
     except Exception:
         return None
+
+
+def _execute_recall_sql(*, psycopg_module: Any, dsn: str, sql: str, params: list[Any]) -> tuple[list[tuple[Any, ...]], float]:
+    started = time.perf_counter()
+    with connect_db(psycopg_module, dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = 3000", [])
+            cur.execute(sql, params)
+            return cur.fetchall(), _elapsed_ms(started)
+
+
+def _recall_compare(
+    vector_rows: list[tuple[Any, ...]],
+    keyword_rows: list[tuple[Any, ...]],
+    *,
+    schema_name: str,
+) -> dict[str, Any]:
+    vector_refs = _row_keys(vector_rows, schema_name=schema_name)
+    keyword_refs = _row_keys(keyword_rows, schema_name=schema_name)
+    vector_set = set(vector_refs)
+    keyword_set = set(keyword_refs)
+    overlap = sorted(vector_set & keyword_set)
+    union_count = len(vector_set | keyword_set)
+    return {
+        "vector_count": len(vector_refs),
+        "keyword_count": len(keyword_refs),
+        "overlap_count": len(overlap),
+        "jaccard": round(len(overlap) / union_count, 4) if union_count else 1.0,
+        "vector_table_refs": vector_refs,
+        "keyword_table_refs": keyword_refs,
+        "only_vector": [item for item in vector_refs if item not in keyword_set],
+        "only_keyword": [item for item in keyword_refs if item not in vector_set],
+    }
+
+
+def _row_keys(rows: list[tuple[Any, ...]], *, schema_name: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        key = _row_key(row, schema_name=schema_name)
+        if key and key not in seen:
+            out.append(key)
+            seen.add(key)
+    return out
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 3)
 
 
 def _call_embedding_fn(embedding_fn: Callable[..., list[float] | None], text: str, *, dimensions: int | None) -> list[float] | None:

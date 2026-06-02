@@ -11,15 +11,27 @@ WAIT_SECONDS="${WAIT_SECONDS:-20}"
 
 cd "$ROOT_DIR"
 
-if [[ ! -f ".venv/bin/activate" ]]; then
-  echo "missing virtualenv: $ROOT_DIR/.venv"
-  exit 1
-fi
-
 set -a
 [[ -f ".env" ]] && source .env
 set +a
-source .venv/bin/activate
+
+if [[ -f ".venv/bin/activate" ]]; then
+  source .venv/bin/activate
+  UVICORN_CMD=(python -m uvicorn)
+  PYTHON_RUNTIME=".venv"
+else
+  echo "missing virtualenv: $ROOT_DIR/.venv; falling back to current python3/uvicorn"
+  PYTHON_RUNTIME="python3"
+  if python3 -c "import uvicorn" >/dev/null 2>&1; then
+    UVICORN_CMD=(python3 -m uvicorn)
+  elif command -v uvicorn >/dev/null 2>&1; then
+    UVICORN_CMD=(uvicorn)
+    PYTHON_RUNTIME="uvicorn command"
+  else
+    echo "missing uvicorn: install uvicorn in .venv or make python3/uvicorn available"
+    exit 1
+  fi
+fi
 
 export GATEWAY_VISIBLE_THINKING_ENABLED="${GATEWAY_VISIBLE_THINKING_ENABLED:-1}"
 export GATEWAY_STREAM_PROCESS_FORMAT="${GATEWAY_STREAM_PROCESS_FORMAT:-openwebui}"
@@ -36,11 +48,12 @@ for ((i = 1; i <= 10; i++)); do
   sleep 0.5
 done
 
-nohup uvicorn app:app --host "$HOST" --port "$PORT" --log-level info >"$LOG_FILE" 2>&1 &
+nohup "${UVICORN_CMD[@]}" app:app --host "$HOST" --port "$PORT" --log-level info >"$LOG_FILE" 2>&1 &
 PID=$!
 disown "$PID" 2>/dev/null || true
 
 echo "gateway starting, pid=$PID, log=$LOG_FILE"
+echo "python runtime: ${PYTHON_RUNTIME}"
 echo "visible thinking enabled: ${GATEWAY_VISIBLE_THINKING_ENABLED}"
 echo "stream process format: ${GATEWAY_STREAM_PROCESS_FORMAT}"
 echo "live thinking enabled: ${GATEWAY_LIVE_THINKING_ENABLED}"
