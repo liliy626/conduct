@@ -33,6 +33,7 @@ class RetrievedDDLDocument:
     business_description: str = ""
     ddl_context: str = ""
     similarity: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -224,6 +225,7 @@ def retrieve_lean_ddl_context(
             business_description=desc,
             ddl_context=lean,
             similarity=similarity,
+            metadata=metadata,
         )
         documents.append(doc)
         table_refs.append(f"{clean_schema}.{table_name}")

@@ -1,0 +1,27 @@
+{
+  "hints": [
+    {
+      "schema": "zx_mlh",
+      "question": "学校有哪些业务领域",
+      "question_patterns": [
+        "学校有哪些业务领域",
+        "有哪些业务领域",
+        "业务领域"
+      ],
+      "raw_sql": "SELECT regexp_replace(table_name, '(_.*|（.*|\\\\(.*)$', '') AS \"业务领域\", COUNT(*) AS \"相关表数\", string_agg(table_name, ', ' ORDER BY table_name) AS \"相关表名\" FROM information_schema.tables WHERE table_schema = 'zx_mlh' AND table_type = 'BASE TABLE' AND table_name NOT IN ('sql_history_vector_documents', 'app_detail', 'yida_form_field_label_map') GROUP BY 1 ORDER BY \"相关表数\" DESC, \"业务领域\"",
+      "table_refs": [
+        "information_schema.tables"
+      ],
+      "column_refs": [
+        "table_schema",
+        "table_name",
+        "table_type"
+      ],
+      "row_count": 28,
+      "used_count": 1,
+      "guardrail_version": "manual_history_hint_v1",
+      "similarity": 1.0,
+      "answer_summary": "历史提示：这是学校业务领域归纳题，业务领域应从 zx_mlh 的业务表名归纳，而不是从 app_detail.app_name 或 app_detail.domain 得出。推荐先看 information_schema.tables / 表目录中的 table_name，按表名前缀或主题词合并同类表，例如“学生请假_明细/学生请假_汇总”归为“学生请假”。不要逐张事实表 inspect；只有用户追问某个领域明细、字段或数据异常时，再对相关表补 ddl_search/inspect_table_schema。"
+    }
+  ]
+}

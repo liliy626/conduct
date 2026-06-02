@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (
     last_used_at      DOUBLE PRECISION NOT NULL DEFAULT 0,
     created_at        DOUBLE PRECISION NOT NULL DEFAULT 0,
     embedding_text    TEXT NOT NULL DEFAULT '',
+    answer_summary    TEXT NOT NULL DEFAULT '',
     embedding         vector({vector_dim}),
     is_active         BOOLEAN NOT NULL DEFAULT TRUE,
     guardrail_version TEXT NOT NULL DEFAULT ''
@@ -50,6 +51,12 @@ def init_experience_table(
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{safe_schema}"')
                 cur.execute(CREATE_EXPERIENCE_TABLE_TEMPLATE.format(schema=safe_schema, table=safe_table, vector_dim=dim))
+                cur.execute(
+                    f"""
+                    ALTER TABLE "{safe_schema}"."{safe_table}"
+                    ADD COLUMN IF NOT EXISTS answer_summary TEXT NOT NULL DEFAULT ''
+                    """
+                )
                 cur.execute(
                     f"""
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_{safe_table}_fingerprint
@@ -95,7 +102,7 @@ def search_query_experiences(
                     cur.execute(
                         f"""
                         SELECT question_text, sql_text, table_refs, column_refs, row_count,
-                               used_count, guardrail_version,
+                               used_count, guardrail_version, answer_summary,
                                1 - (embedding <=> %s::vector) AS similarity
                         FROM "{safe_schema}"."{safe_table}"
                         WHERE is_active = TRUE AND embedding IS NOT NULL
@@ -108,7 +115,7 @@ def search_query_experiences(
                     cur.execute(
                         f"""
                         SELECT question_text, sql_text, table_refs, column_refs, row_count,
-                               used_count, guardrail_version, 0 AS similarity
+                               used_count, guardrail_version, answer_summary, 0 AS similarity
                         FROM "{safe_schema}"."{safe_table}"
                         WHERE is_active = TRUE AND question_text ILIKE %s
                         ORDER BY last_used_at DESC
@@ -142,9 +149,10 @@ def record_query_experience(
     column_refs: list[str] | None = None,
     guardrail_version: str = "",
 ) -> bool:
-    del tenant_id, selected_path, json_plan, answer_summary, success_score
+    del tenant_id, selected_path, json_plan, success_score
     clean_sql = str(raw_sql or "").strip()
     clean_question = str(question or "").strip()
+    clean_summary = str(answer_summary or "").strip()[:1200]
     if not clean_question or not clean_sql or not str(dsn or "").strip() or psycopg_module is None:
         return False
     if not should_record_sql_history(sql=clean_sql, row_count=row_count):
@@ -158,7 +166,12 @@ def record_query_experience(
     if not init_experience_table(dsn=dsn, psycopg_module=psycopg_module, schema=safe_schema, table=safe_table):
         return False
     fingerprint = sql_fingerprint(clean_sql)
-    embedding_text = build_embedding_text(question=clean_question, table_refs=refs, column_refs=cols)
+    embedding_text = build_embedding_text(
+        question=clean_question,
+        table_refs=refs,
+        column_refs=cols,
+        answer_summary=clean_summary,
+    )
     vector = embedding_fn(embedding_text) if embedding_fn is not None else None
     now = time.time()
     item_id = hashlib.sha256(f"{safe_schema}:{fingerprint}".encode("utf-8")).hexdigest()[:32]
@@ -170,13 +183,18 @@ def record_query_experience(
                     INSERT INTO "{safe_schema}"."{safe_table}"
                         (id, question_text, sql_text, sql_fingerprint, table_refs, column_refs,
                          row_count, used_count, last_used_at, created_at, embedding_text,
-                         embedding, is_active, guardrail_version)
-                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, 1, %s, %s, %s, %s::vector, TRUE, %s)
+                         answer_summary, embedding, is_active, guardrail_version)
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, 1, %s, %s, %s, %s, %s::vector, TRUE, %s)
                     ON CONFLICT (sql_fingerprint) DO UPDATE SET
                         used_count = "{safe_table}".used_count + 1,
                         last_used_at = EXCLUDED.last_used_at,
                         row_count = EXCLUDED.row_count,
-                        question_text = EXCLUDED.question_text
+                        question_text = EXCLUDED.question_text,
+                        embedding_text = EXCLUDED.embedding_text,
+                        answer_summary = CASE
+                            WHEN EXCLUDED.answer_summary <> '' THEN EXCLUDED.answer_summary
+                            ELSE "{safe_table}".answer_summary
+                        END
                     """,
                     [
                         item_id,
@@ -189,6 +207,7 @@ def record_query_experience(
                         now,
                         now,
                         embedding_text,
+                        clean_summary,
                         json.dumps(vector) if vector else None,
                         guardrail_version or "v1",
                     ],
@@ -227,14 +246,22 @@ def normalize_sql_for_fingerprint(sql: str) -> str:
     return text.strip().rstrip(";")
 
 
-def build_embedding_text(*, question: str, table_refs: list[str], column_refs: list[str]) -> str:
-    return "\n".join(
-        [
-            str(question or "").strip(),
-            "tables: " + ", ".join(str(item) for item in table_refs[:8]),
-            "columns: " + ", ".join(str(item) for item in column_refs[:20]),
-        ]
-    ).strip()
+def build_embedding_text(
+    *,
+    question: str,
+    table_refs: list[str],
+    column_refs: list[str],
+    answer_summary: str = "",
+) -> str:
+    parts = [
+        str(question or "").strip(),
+        "tables: " + ", ".join(str(item) for item in table_refs[:8]),
+        "columns: " + ", ".join(str(item) for item in column_refs[:20]),
+    ]
+    clean_summary = str(answer_summary or "").strip()
+    if clean_summary:
+        parts.append("hint: " + clean_summary[:500])
+    return "\n".join(parts).strip()
 
 
 def extract_column_refs(sql: str) -> list[str]:
@@ -258,6 +285,18 @@ def _experience_row_to_dict(row: Any) -> dict[str, Any]:
             "guardrail_version": "",
             "similarity": float(row[8] or 0.0),
             "answer_summary": str(row[6] or "") or "历史 SQL 仅供参考；必须按当前问题、当前 DDL 和当前时间口径重写。",
+        }
+    if len(row) >= 9:
+        return {
+            "question": str(row[0] or ""),
+            "raw_sql": str(row[1] or ""),
+            "table_refs": _loads_json(row[2], fallback=[]),
+            "column_refs": _loads_json(row[3], fallback=[]),
+            "row_count": int(row[4] or 0),
+            "used_count": int(row[5] or 0),
+            "guardrail_version": str(row[6] or ""),
+            "similarity": float(row[8] or 0.0),
+            "answer_summary": str(row[7] or "") or "历史 SQL 仅供参考；必须按当前问题、当前 DDL 和当前时间口径重写。",
         }
     return {
         "question": str(row[0] or ""),

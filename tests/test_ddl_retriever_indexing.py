@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from types import SimpleNamespace
 import threading
 import time
@@ -183,3 +184,98 @@ def test_coverage_probe_uses_lightweight_presence_and_latest_time_queries(monkey
     assert "current_period_count" not in result
     assert executed_sql
     assert not any("COUNT(*)" in sql or "COUNT(" in sql for sql in executed_sql)
+
+
+def test_ddl_search_returns_candidate_evidence_packets_from_metadata(monkeypatch) -> None:
+    from gateway_core.agents.school_sql.sql_tools import DDLReactTools
+    import gateway_core.agents.school_sql.sql_tools as sql_tools
+    from gateway_core.schema_context.ddl_retriever import RetrievedDDLContext, RetrievedDDLDocument
+
+    tool = DDLReactTools.__new__(DDLReactTools)
+    tool.question = "最近有什么异常"
+    tool.tenant_id = "sch_zx_mlh"
+    tool.package_index = SimpleNamespace(source_schema="zx_mlh")
+    tool.dsn = "postgres://fake"
+    tool.psycopg_module = object()
+    tool.embedding_fn = lambda text: [0.1, 0.2]
+    tool.trace = None
+    tool.allowed_table_refs = []
+    tool.ddl_contexts = []
+    tool._last_evidence_packets_by_ref = {}
+    tool._last_ddl_sql_ready_refs = set()
+    tool._post_ddl_inspect_refs = set()
+    tool._post_ddl_sample_refs = set()
+    tool._last_ddl_search_finished_perf = 0.0
+
+    monkeypatch.setattr(sql_tools, "_ddl_top_k", lambda: 1)
+    monkeypatch.setattr(sql_tools, "_ddl_max_chars_per_doc", lambda: 2200)
+    monkeypatch.setattr(sql_tools, "_ddl_vector_table", lambda: "ddl_vector_documents")
+    monkeypatch.setattr(
+        sql_tools,
+        "retrieve_lean_ddl_context",
+        lambda **_kwargs: RetrievedDDLContext(
+            ddl='Table: "zx_mlh"."每日执勤_行政执勤记录表"',
+            source="schema_ddl_vector",
+            schema_name="zx_mlh",
+            table_refs=["zx_mlh.每日执勤_行政执勤记录表"],
+            documents=[
+                RetrievedDDLDocument(
+                    table_name="每日执勤_行政执勤记录表",
+                    business_description="行政执勤异常记录",
+                    ddl_context="columns...",
+                    metadata={
+                        "freshness_status": "active",
+                        "latest_time": "2026-06-02 10:31:00+08:00",
+                        "recommended_time_field": "__instance_time",
+                        "sql_ready": True,
+                        "sql_ready_risk": "low",
+                        "latest_row_preview": {"__instance_time": "2026-06-02 10:30:00", "异常模块": "卫生"},
+                        "candidate_sql_hints": ["ORDER BY __instance_time DESC LIMIT 20"],
+                    },
+                )
+            ],
+        ),
+    )
+    tool._probe_candidate_evidence_map = lambda refs, query: [
+        {
+            "table_ref": "zx_mlh.每日执勤_行政执勤记录表",
+            "status": "active_current_period",
+            "time_field": "__instance_time",
+        }
+    ]
+
+    payload = json.loads(tool.ddl_search("最近异常"))
+
+    packet = payload["candidate_evidence_packets"][0]
+    assert packet["table_ref"] == "zx_mlh.每日执勤_行政执勤记录表"
+    assert packet["freshness_status"] == "active"
+    assert packet["recommended_time_field"] == "__instance_time"
+    assert packet["sql_ready"] is True
+    assert packet["sql_ready_risk"] == "low"
+    assert packet["latest_row_preview"]["异常模块"] == "卫生"
+    assert payload["sql_ready_count"] == 1
+    assert payload["sql_ready_risk"]["low"] == 1
+
+
+def test_ddl_to_sql_observation_marks_direct_sql_after_ready_ddl() -> None:
+    from gateway_core.agents.school_sql.sql_tools import DDLReactTools
+
+    tool = DDLReactTools.__new__(DDLReactTools)
+    tool.package_index = SimpleNamespace(source_schema="zx_mlh")
+    tool._last_ddl_search_finished_perf = time.perf_counter() - 0.05
+    tool._last_ddl_sql_ready_refs = {"zx_mlh.每日执勤_行政执勤记录表"}
+    tool._post_ddl_inspect_refs = set()
+    tool._post_ddl_sample_refs = set()
+    tool._last_evidence_packets_by_ref = {
+        "zx_mlh.每日执勤_行政执勤记录表": {
+            "table_ref": "zx_mlh.每日执勤_行政执勤记录表",
+            "sql_ready_risk": "low",
+        }
+    }
+
+    observation = tool._ddl_to_sql_observation(["每日执勤_行政执勤记录表"])
+
+    assert observation["ddl_to_sql_ms"] > 0
+    assert observation["direct_sql_after_ddl_search"] is True
+    assert observation["inspect_skipped_by_sql_ready"] is True
+    assert observation["sql_ready_risk"] == {"zx_mlh.每日执勤_行政执勤记录表": "low"}

@@ -18,10 +18,12 @@ from gateway_core.schema_context.ddl_retriever import RetrievedDDLContext, retri
 from gateway_core.schema_context.query_experience import (
     EXPERIENCE_CACHE as _EXPERIENCE_CACHE,
     experience_cache_enabled as _experience_cache_enabled,
+    experience_hints_for_question as _experience_hints_for_question,
     experience_schema as _experience_schema,
     experience_table as _experience_table,
     experience_top_k_for_question as _experience_top_k_for_question,
     hash_payload as _hash_payload,
+    merge_experience_hints as _merge_experience_hints,
     record_experience_enabled as _record_experience_enabled,
     sanitize_experiences_for_question as _sanitize_experiences_for_question,
 )
@@ -100,6 +102,11 @@ class DDLReactTools:
         self.allowed_table_refs: list[str] = []
         self.ddl_contexts: list[dict[str, Any]] = []
         self.json_sampled_refs: set[str] = set()
+        self._last_ddl_search_finished_perf: float = 0.0
+        self._last_ddl_sql_ready_refs: set[str] = set()
+        self._post_ddl_inspect_refs: set[str] = set()
+        self._post_ddl_sample_refs: set[str] = set()
+        self._last_evidence_packets_by_ref: dict[str, dict[str, Any]] = {}
         self._sql_query_counter = 0
         self._sql_query_counter_lock = threading.Lock()
         self.evidence_board = EvidenceBoard(
@@ -124,6 +131,9 @@ class DDLReactTools:
                 name="inspect_table_schema",
                 description=(
                     "查看当前学校 schema 下某张表的字段、类型和 DDL 摘要，并把该表加入本轮 SQL 白名单。"
+                    "当 ddl_search 返回的 evidence packet 显示 sql_ready=true 且 sql_ready_risk=low，"
+                    "并且问题可由单表明确字段回答时，优先直接 sql_db_query；只有字段含义、JSONB/数组展开、"
+                    "关联关系或时间口径不明确时再调用本工具。"
                     "输入表名，可以是 表名 或 schema.表名。"
                 ),
                 func=self.inspect_table_schema,
@@ -132,6 +142,7 @@ class DDLReactTools:
                 name="sample_table_rows",
                 description=(
                     "抽样查看当前学校 schema 下某张表的真实数据行。"
+                    "ddl_search 的 latest_row_preview 已足够且 sql_ready_risk=low 时通常不需要调用；"
                     "遇到 JSON/数组字段、字段含义不确定、聚合前需要确认数据结构时调用。"
                     "参数 table_name 是表名，limit 默认 5。"
                 ),
@@ -160,7 +171,12 @@ class DDLReactTools:
                 name="ddl_search",
                 description=(
                     "按业务问题或线索从当前学校 schema 的 ddl_vector_documents 检索相关表结构。"
-                    "输入是自然语言检索词。写 SQL 前必须先调用。"
+                    "返回 candidate_evidence_packets：包含 freshness_status、recommended_time_field、latest_row_preview、"
+                    "sql_ready、sql_ready_risk 和 fallback 建议。写 SQL 前必须先调用。"
+                    "如果候选表 sql_ready=true、sql_ready_risk=low，且用户问题可由明确单表字段回答，"
+                    "优先直接用 recommended_time_field 生成 SQL 并调用 sql_db_query；"
+                    "只有字段含义、JSONB/数组展开、多表关联或时间口径不明确时再 inspect/sample。"
+                    "输入是自然语言检索词。"
                 ),
                 func=self.ddl_search,
             ),
@@ -257,6 +273,7 @@ class DDLReactTools:
                 payload = {"source": "information_schema", "allowed": False, "error": "invalid_table_name"}
                 set_step_output(step, payload)
                 return json.dumps(payload, ensure_ascii=False, default=str)
+            self._post_ddl_inspect_refs.add(_normalize_ref(f"{table_ref[0]}.{table_ref[1]}"))
             try:
                 columns = _inspect_table_columns(
                     psycopg_module=self.psycopg_module,
@@ -325,6 +342,7 @@ class DDLReactTools:
                 payload = {"source": "school_schema", "allowed": False, "error": "invalid_table_name"}
                 set_step_output(step, payload)
                 return json.dumps(payload, ensure_ascii=False, default=str)
+            self._post_ddl_sample_refs.add(_normalize_ref(f"{table_ref[0]}.{table_ref[1]}"))
             self._remember_table_ref(f"{table_ref[0]}.{table_ref[1]}")
             sample_columns = _sample_select_columns(
                 psycopg_module=self.psycopg_module,
@@ -632,10 +650,28 @@ class DDLReactTools:
             self._remember_ddl_context(result, query=clean_query)
             coverage_started = time.perf_counter()
             coverage_map = self._probe_candidate_evidence_map(result.table_refs, query=clean_query)
+            evidence_packets = _candidate_evidence_packets(
+                schema_name=self.package_index.source_schema,
+                documents=result.documents,
+                coverage_map=coverage_map,
+            )
+            self._last_evidence_packets_by_ref = {
+                _normalize_ref(str(item.get("table_ref") or "")): item
+                for item in evidence_packets
+                if str(item.get("table_ref") or "").strip()
+            }
+            self._last_ddl_sql_ready_refs = {
+                _normalize_ref(str(item.get("table_ref") or ""))
+                for item in evidence_packets
+                if bool(item.get("sql_ready"))
+            }
+            self._post_ddl_inspect_refs.clear()
+            self._post_ddl_sample_refs.clear()
             timings_ms = {
                 **(result.timings_ms or {}),
                 "coverage_probe_ms": round((time.perf_counter() - coverage_started) * 1000, 3),
             }
+            sql_ready_risks = _sql_ready_risk_summary(evidence_packets)
             payload = {
                 "source": "ddl_vector_documents",
                 "schema_name": result.schema_name,
@@ -643,6 +679,9 @@ class DDLReactTools:
                 "doc_count": len(result.documents),
                 "table_refs": result.table_refs,
                 "candidate_evidence_map": coverage_map,
+                "candidate_evidence_packets": evidence_packets,
+                "sql_ready_count": sum(1 for item in evidence_packets if bool(item.get("sql_ready"))),
+                "sql_ready_risk": sql_ready_risks,
                 "timings_ms": timings_ms,
                 "recall_compare": result.recall_compare,
                 "from_cache": result.from_cache,
@@ -652,13 +691,18 @@ class DDLReactTools:
                         "table_name": item.table_name,
                         "business_description": item.business_description,
                         "similarity": item.similarity,
+                        "evidence_packet": self._last_evidence_packets_by_ref.get(
+                            _normalize_ref(f"{self.package_index.source_schema}.{item.table_name}"),
+                            {},
+                        ),
                     }
                     for item in result.documents
                 ],
                 "next_step_hint": (
-                    "先阅读 candidate_evidence_map：优先选择 has_current_period_data=true 或 latest_time 最新的活跃表；"
-                    "对 stale/empty 的旧表不要直接下结论为 0。"
-                    "再从 table_refs 中选择相关表，调用 inspect_table_schema 获取精确字段；不要把无关表结构继续带入后续推理。"
+                    "先阅读 candidate_evidence_packets：优先选择 freshness_status=active、latest_time 最新、"
+                    "sql_ready=true 且 sql_ready_risk=low 的候选表。若问题可由明确单表字段回答，"
+                    "优先使用 recommended_time_field 和 latest_row_preview 直接生成 sql_db_query。"
+                    "仅在字段含义、JSONB/数组展开、多表关联或时间口径不明确时，再调用 inspect_table_schema/sample_table_rows。"
                 ),
             }
             if _ddl_search_returns_full_ddl():
@@ -676,21 +720,27 @@ class DDLReactTools:
                     "error": result.error,
                     "documents": payload["documents"],
                     "candidate_evidence_map": coverage_map,
+                    "candidate_evidence_packets": evidence_packets,
+                    "sql_ready_count": payload["sql_ready_count"],
+                    "sql_ready_risk": sql_ready_risks,
                     "timings_ms": timings_ms,
                     "recall_compare": result.recall_compare,
                 },
             )
+            self._last_ddl_search_finished_perf = time.perf_counter()
         return json.dumps(payload, ensure_ascii=False, default=str)
 
     def sql_experience_search(self, query: str) -> str:
         clean_query = str(query or "").strip() or self.question
+        schema_name = _experience_schema(self.package_index.source_schema)
+        limit = _experience_top_k_for_question(clean_query)
         cache_key = _hash_payload(
             {
                 "tenant_id": self.tenant_id,
                 "query": clean_query,
-                "schema": _experience_schema(self.package_index.source_schema),
+                "schema": schema_name,
                 "table": _experience_table(),
-                "limit": _experience_top_k_for_question(clean_query),
+                "limit": limit,
             }
         )
         with trace_step(
@@ -709,18 +759,21 @@ class DDLReactTools:
                     dsn=self.dsn,
                     psycopg_module=self.psycopg_module,
                     embedding_fn=self.embedding_fn,
-                    schema=_experience_schema(self.package_index.source_schema),
+                    schema=schema_name,
                     table=_experience_table(),
-                    limit=_experience_top_k_for_question(clean_query),
+                    limit=limit,
                 )
                 if _experience_cache_enabled():
                     _EXPERIENCE_CACHE.set(cache_key, experiences)
                 from_cache = False
+            hints = _experience_hints_for_question(question=clean_query, schema_name=schema_name)
+            experiences = _merge_experience_hints(hints=hints, experiences=experiences, limit=limit)
             experiences = _sanitize_experiences_for_question(clean_query, experiences)
             payload = {
                 "source": "sql_history_vector_documents",
                 "query": clean_query,
                 "experience_count": len(experiences),
+                "manual_hint_count": len(hints),
                 "experiences": experiences,
                 "from_cache": from_cache,
             }
@@ -742,10 +795,12 @@ class DDLReactTools:
             },
         ) as step:
             if not self.allowed_table_refs:
+                ddl_to_sql_observation = self._ddl_to_sql_observation([])
                 payload = {
                     "source": "school_schema",
                     "allowed": False,
                     "error": "ddl_search_required_before_sql_db_query",
+                    **ddl_to_sql_observation,
                 }
                 set_step_output(step, payload)
                 self._record_sql_execution_trace(
@@ -765,6 +820,7 @@ class DDLReactTools:
                 extra_allowed_refs=self.allowed_table_refs,
                 allowed_schema=self.package_index.source_schema,
             )
+            ddl_to_sql_observation = self._ddl_to_sql_observation(guardrail.referenced_views)
             if not guardrail.allowed:
                 payload = {
                     "source": "school_schema",
@@ -772,6 +828,7 @@ class DDLReactTools:
                     "error": guardrail.reason,
                     "referenced_views": guardrail.referenced_views,
                     "blocked_tokens": guardrail.blocked_tokens,
+                    **ddl_to_sql_observation,
                 }
                 set_step_output(step, payload)
                 self._record_sql_execution_trace(
@@ -799,6 +856,7 @@ class DDLReactTools:
                     "sql": guardrail.sql,
                     "referenced_views": guardrail.referenced_views,
                     "sample_sql_hint": _json_sample_sql_hint(guardrail.sql),
+                    **ddl_to_sql_observation,
                 }
                 set_step_output(step, payload)
                 self._record_sql_execution_trace(
@@ -821,6 +879,7 @@ class DDLReactTools:
                     "sql": guardrail.sql,
                     "referenced_views": guardrail.referenced_views,
                     "limit_applied": guardrail.limit_applied,
+                    **ddl_to_sql_observation,
                 }
                 set_step_output(step, payload)
                 self._record_sql_execution_trace(
@@ -972,6 +1031,7 @@ class DDLReactTools:
                 "total_count_error": total_count_error,
                 "expanded_to_full_rows": expanded_to_full_rows,
                 "query_may_have_more": query_may_have_more,
+                **ddl_to_sql_observation,
                 "next_query_hint": (
                     f"本次结果达到 SQL LIMIT {effective_limit} 行，可能还有更多数据；"
                     "如果用户问“多少/总数/共有”，请另查 COUNT(*) 或 COUNT(DISTINCT ...)；"
@@ -1024,6 +1084,7 @@ class DDLReactTools:
                     "total_count_error": total_count_error,
                     "expanded_to_full_rows": expanded_to_full_rows,
                     "query_may_have_more": query_may_have_more,
+                    **ddl_to_sql_observation,
                     **entity_stats,
                     "evidence_board": board_snapshot,
                     "experience_recorded": experience_recorded,
@@ -1259,6 +1320,28 @@ class DDLReactTools:
         clean = str(ref or "").strip()
         if clean and clean not in self.allowed_table_refs:
             self.allowed_table_refs.append(clean)
+
+    def _ddl_to_sql_observation(self, referenced_views: list[str]) -> dict[str, Any]:
+        refs = _normalized_ref_set(referenced_views, schema_name=self.package_index.source_schema)
+        sql_ready_refs = refs & self._last_ddl_sql_ready_refs
+        inspected_refs = refs & self._post_ddl_inspect_refs
+        sampled_refs = refs & self._post_ddl_sample_refs
+        ddl_to_sql_ms = 0.0
+        if self._last_ddl_search_finished_perf > 0:
+            ddl_to_sql_ms = round((time.perf_counter() - self._last_ddl_search_finished_perf) * 1000, 3)
+        direct_sql = bool(self._last_ddl_search_finished_perf and refs and not inspected_refs and not sampled_refs)
+        return {
+            "ddl_to_sql_ms": ddl_to_sql_ms,
+            "direct_sql_after_ddl_search": direct_sql,
+            "inspect_skipped_by_sql_ready": bool(direct_sql and sql_ready_refs),
+            "sql_ready_refs_used": sorted(sql_ready_refs),
+            "inspected_after_ddl_refs": sorted(inspected_refs),
+            "sampled_after_ddl_refs": sorted(sampled_refs),
+            "sql_ready_risk": {
+                ref: str((self._last_evidence_packets_by_ref.get(ref) or {}).get("sql_ready_risk") or "")
+                for ref in sorted(sql_ready_refs)
+            },
+        }
 
     def _probe_candidate_evidence_map(self, refs: list[str], *, query: str) -> list[dict[str, Any]]:
         if not _coverage_probe_enabled():
@@ -1508,6 +1591,319 @@ class DDLReactTools:
                 "jsonb_column": jsonb_column,
             }
         return {}
+
+
+def _candidate_evidence_packets(
+    *,
+    schema_name: str,
+    documents: list[Any],
+    coverage_map: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    coverage_by_ref = {
+        _normalize_ref(str(item.get("table_ref") or "")): item
+        for item in coverage_map
+        if isinstance(item, dict)
+    }
+    packets: list[dict[str, Any]] = []
+    for doc in documents:
+        table_name = str(getattr(doc, "table_name", "") or "").strip()
+        if not table_name:
+            continue
+        table_ref = f"{schema_name}.{table_name}"
+        metadata = _flatten_evidence_metadata(getattr(doc, "metadata", {}) or {})
+        coverage = coverage_by_ref.get(_normalize_ref(table_ref), {})
+        packet = _build_candidate_evidence_packet(
+            table_ref=table_ref,
+            table_name=table_name,
+            business_description=str(getattr(doc, "business_description", "") or ""),
+            metadata=metadata,
+            coverage=coverage,
+        )
+        packets.append(packet)
+    return packets
+
+
+def _build_candidate_evidence_packet(
+    *,
+    table_ref: str,
+    table_name: str,
+    business_description: str,
+    metadata: dict[str, Any],
+    coverage: dict[str, Any],
+) -> dict[str, Any]:
+    latest_row = _dict_value(
+        metadata,
+        "latest_row_preview",
+        "latest_row",
+        "sample_row",
+        "sample_data",
+        "row_preview",
+    )
+    latest_time = _first_present(
+        metadata,
+        coverage,
+        ["latest_time", "last_updated_at", "last_update_time", "max_time", "latest_instance_time"],
+    )
+    recommended_time_field = str(
+        _first_present(
+            metadata,
+            coverage,
+            ["recommended_time_field", "time_field", "event_time_field", "latest_time_field", "partition_time_field"],
+        )
+        or ""
+    ).strip()
+    freshness_status = _freshness_status(metadata=metadata, coverage=coverage, latest_time=latest_time)
+    sql_ready_reasons = _list_value(metadata, "sql_ready_reasons", "ready_reasons")
+    sql_ready = _metadata_bool(metadata, "sql_ready")
+    if sql_ready is None:
+        sql_ready_reasons = [
+            *sql_ready_reasons,
+            *(
+                ["recommended_time_field_available"]
+                if recommended_time_field
+                else []
+            ),
+            *(
+                ["latest_row_preview_available"]
+                if latest_row
+                else []
+            ),
+            *(
+                ["table_has_recent_data"]
+                if freshness_status == "active"
+                else []
+            ),
+        ]
+        sql_ready = bool(recommended_time_field and latest_row and freshness_status in {"active", "unknown"})
+    sql_ready_risk = str(metadata.get("sql_ready_risk") or metadata.get("risk") or "").strip().lower()
+    if not sql_ready_risk:
+        sql_ready_risk = _infer_sql_ready_risk(sql_ready=bool(sql_ready), latest_row=latest_row, metadata=metadata)
+    needs_sample = _needs_sample(latest_row=latest_row, metadata=metadata, sql_ready_risk=sql_ready_risk)
+    needs_inspect = _needs_inspect(sql_ready=bool(sql_ready), sql_ready_risk=sql_ready_risk, metadata=metadata)
+    fallback_reasons = _fallback_reasons(
+        sql_ready=bool(sql_ready),
+        sql_ready_risk=sql_ready_risk,
+        needs_sample=needs_sample,
+        needs_inspect=needs_inspect,
+        latest_row=latest_row,
+        recommended_time_field=recommended_time_field,
+    )
+    return {
+        "table_ref": table_ref,
+        "table_name": table_name,
+        "business_description": business_description,
+        "freshness_status": freshness_status,
+        "latest_time": latest_time,
+        "row_count_estimate": _first_present(metadata, coverage, ["row_count_estimate", "estimated_row_count", "total_count"]),
+        "recommended_time_field": recommended_time_field,
+        "sql_ready": bool(sql_ready),
+        "sql_ready_risk": sql_ready_risk,
+        "sql_ready_reasons": _dedupe_texts(sql_ready_reasons),
+        "latest_row_preview": _compact_latest_row(latest_row),
+        "candidate_sql_hints": _list_value(metadata, "candidate_sql_hints", "sql_hints", "query_hints"),
+        "needs_inspect": needs_inspect,
+        "needs_sample": needs_sample,
+        "fallback_reason": "; ".join(fallback_reasons),
+        "metadata_source": "ddl_vector_documents.metadata" if metadata else "coverage_probe",
+    }
+
+
+def _flatten_evidence_metadata(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("evidence_packet", "table_state", "state_metadata", "dynamic_metadata", "freshness"):
+        nested = metadata.get(key)
+        if isinstance(nested, dict):
+            out.update(nested)
+    out.update(metadata)
+    return out
+
+
+def _freshness_status(*, metadata: dict[str, Any], coverage: dict[str, Any], latest_time: Any) -> str:
+    explicit = str(metadata.get("freshness_status") or metadata.get("data_status") or "").strip().lower()
+    if explicit:
+        if explicit in {"active", "fresh", "current", "活跃"}:
+            return "active"
+        if explicit in {"stale", "inactive", "old", "非活跃", "过期"}:
+            return "stale"
+        if explicit in {"empty", "none", "no_data", "空"}:
+            return "empty"
+        return explicit
+    status = str(coverage.get("status") or "").strip().lower()
+    if status == "active_current_period" or bool(coverage.get("has_current_period_data")):
+        return "active"
+    if status in {"empty", "stale", "likely_stale_or_no_current_period"}:
+        return "stale" if latest_time else "empty"
+    if bool(coverage.get("has_rows")):
+        return "unknown"
+    return "unknown" if latest_time else "empty"
+
+
+def _infer_sql_ready_risk(*, sql_ready: bool, latest_row: dict[str, Any], metadata: dict[str, Any]) -> str:
+    if not sql_ready:
+        return "high"
+    metadata_text = json.dumps(metadata, ensure_ascii=False, default=str).lower()
+    if _latest_row_has_complex_value(latest_row) or any(token in metadata_text for token in ["jsonb", "array", "数组"]):
+        return "medium"
+    if any(str(key).strip()[:1].isdigit() for key in (latest_row or {}).keys()):
+        return "medium"
+    return "low"
+
+
+def _needs_sample(*, latest_row: dict[str, Any], metadata: dict[str, Any], sql_ready_risk: str) -> bool:
+    explicit = _metadata_bool(metadata, "needs_sample")
+    if explicit is not None:
+        return explicit
+    if not latest_row:
+        return True
+    return bool(sql_ready_risk == "medium" and _latest_row_has_complex_value(latest_row))
+
+
+def _needs_inspect(*, sql_ready: bool, sql_ready_risk: str, metadata: dict[str, Any]) -> bool:
+    explicit = _metadata_bool(metadata, "needs_inspect")
+    if explicit is not None:
+        return explicit
+    return (not sql_ready) or sql_ready_risk == "high"
+
+
+def _fallback_reasons(
+    *,
+    sql_ready: bool,
+    sql_ready_risk: str,
+    needs_sample: bool,
+    needs_inspect: bool,
+    latest_row: dict[str, Any],
+    recommended_time_field: str,
+) -> list[str]:
+    reasons: list[str] = []
+    if not sql_ready:
+        reasons.append("sql_ready=false")
+    if not recommended_time_field:
+        reasons.append("missing_recommended_time_field")
+    if not latest_row:
+        reasons.append("missing_latest_row_preview")
+    if sql_ready_risk in {"medium", "high"}:
+        reasons.append(f"sql_ready_risk={sql_ready_risk}")
+    if needs_inspect:
+        reasons.append("inspect_table_schema_allowed")
+    if needs_sample:
+        reasons.append("sample_table_rows_allowed")
+    return reasons
+
+
+def _compact_latest_row(row: Any) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in row.items():
+        if len(out) >= _sample_column_limit():
+            break
+        key_text = str(key)
+        if _is_heavy_sample_column(key_text) or _is_sensitive_packet_key(key_text):
+            continue
+        out[key_text] = _compact_sample_value(value, limit=min(_sample_cell_max_chars(), 300))
+    return out
+
+
+def _is_sensitive_packet_key(key: str) -> bool:
+    text = str(key or "").lower()
+    return any(
+        token in text
+        for token in [
+            "password",
+            "passwd",
+            "pwd",
+            "密码",
+            "身份证",
+            "证件",
+            "联系方式",
+            "手机号",
+            "手机",
+            "电话",
+            "住址",
+            "地址",
+            "家庭",
+        ]
+    )
+
+
+def _first_present(metadata: dict[str, Any], coverage: dict[str, Any], keys: list[str]) -> Any:
+    for source in (metadata, coverage):
+        for key in keys:
+            value = source.get(key) if isinstance(source, dict) else None
+            if value not in (None, ""):
+                return value
+    return None
+
+
+def _dict_value(metadata: dict[str, Any], *keys: str) -> dict[str, Any]:
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _list_value(metadata: dict[str, Any], *keys: str) -> list[str]:
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [item.strip() for item in re.split(r"[\n;；]+", value) if item.strip()]
+    return []
+
+
+def _metadata_bool(metadata: dict[str, Any], key: str) -> bool | None:
+    if key not in metadata:
+        return None
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n"}:
+        return False
+    return None
+
+
+def _latest_row_has_complex_value(row: dict[str, Any]) -> bool:
+    return any(isinstance(value, (dict, list)) for value in (row or {}).values())
+
+
+def _dedupe_texts(values: list[str]) -> list[str]:
+    out: list[str] = []
+    for value in values:
+        clean = str(value or "").strip()
+        if clean and clean not in out:
+            out.append(clean)
+    return out
+
+
+def _sql_ready_risk_summary(packets: list[dict[str, Any]]) -> dict[str, int]:
+    summary = {"low": 0, "medium": 0, "high": 0, "unknown": 0}
+    for packet in packets:
+        risk = str(packet.get("sql_ready_risk") or "unknown").lower()
+        if risk not in summary:
+            risk = "unknown"
+        summary[risk] += 1
+    return summary
+
+
+def _normalized_ref_set(refs: list[str], *, schema_name: str) -> set[str]:
+    out: set[str] = set()
+    for ref in refs or []:
+        clean = str(ref or "").strip()
+        if not clean:
+            continue
+        normalized = _normalize_ref(clean)
+        if normalized:
+            out.add(normalized)
+        if "." not in clean:
+            out.add(_normalize_ref(f"{schema_name}.{clean}"))
+    return out
 
 
 def _ddl_search_returns_full_ddl() -> bool:

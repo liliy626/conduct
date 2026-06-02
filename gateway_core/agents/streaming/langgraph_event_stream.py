@@ -107,6 +107,38 @@ def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) 
         trace.steps.append(step)
 
 
+def flush_active_langgraph_llm_runs(trace: Any, *, prefix: str = "langgraph") -> None:
+    if trace is None:
+        return
+    runs = _active_llm_runs(trace)
+    if not runs:
+        return
+    now = time.perf_counter()
+    ended_wall_at = time.time()
+    for run_id, state in list(runs.items()):
+        started_at = float(state.get("started_at") or now)
+        first_token_at = state.get("first_token_at")
+        duration_ms = int((now - started_at) * 1000)
+        first_token_ms = int((float(first_token_at) - started_at) * 1000) if first_token_at else None
+        step = SchoolTraceStep(
+            name=f"{prefix}.llm",
+            status="ok",
+            input=state.get("input") if isinstance(state.get("input"), dict) else {},
+            output={
+                "event": "flushed_without_end_event",
+                "run_id": run_id,
+                "first_token_ms": first_token_ms,
+                "stream_chunk_count": int(state.get("stream_chunk_count") or 0),
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+            duration_ms=max(0, duration_ms),
+            started_at=float(state.get("started_wall_at") or ended_wall_at),
+            ended_at=ended_wall_at,
+        )
+        trace.steps.append(step)
+        runs.pop(run_id, None)
+
+
 def _active_llm_runs(trace: Any) -> dict[str, dict[str, Any]]:
     runs = getattr(trace, "_active_llm_runs", None)
     if not isinstance(runs, dict):

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 from gateway_core.schema_context.ttl_cache import TTLCache
@@ -110,6 +111,43 @@ def experience_cache_enabled() -> bool:
     }
 
 
+def experience_hints_for_question(*, question: str, schema_name: str = "") -> list[dict[str, Any]]:
+    clean_question = str(question or "").strip()
+    if not clean_question:
+        return []
+    clean_schema = str(schema_name or "").strip()
+    out: list[dict[str, Any]] = []
+    for item in _load_experience_hints():
+        if not isinstance(item, dict) or not _hint_schema_matches(item, clean_schema):
+            continue
+        if not _hint_question_matches(item, clean_question):
+            continue
+        out.append(_hint_to_experience(item, fallback_question=clean_question))
+    return out
+
+
+def merge_experience_hints(
+    *,
+    hints: list[dict[str, Any]],
+    experiences: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    clean_limit = max(1, min(int(limit or 5), _experience_max_k()))
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in [*(hints or []), *(experiences or [])]:
+        if not isinstance(item, dict):
+            continue
+        key = _experience_identity(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+        if len(merged) >= clean_limit:
+            break
+    return merged
+
+
 def sanitize_experiences_for_question(question: str, experiences: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if _question_has_explicit_school_period(question):
         return experiences
@@ -136,6 +174,80 @@ def _question_has_explicit_school_period(question: str) -> bool:
             text,
         )
     )
+
+
+def _load_experience_hints() -> list[dict[str, Any]]:
+    raw_path = _env_value("SCHOOL_QUERY_EXPERIENCE_HINTS_FILE", "TENANT_QUERY_EXPERIENCE_HINTS_FILE", "config/sql_history_hints.json")
+    if not raw_path:
+        return []
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(raw, dict):
+        raw = raw.get("hints")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _hint_schema_matches(item: dict[str, Any], schema_name: str) -> bool:
+    raw_schemas = item.get("schemas")
+    if not isinstance(raw_schemas, list):
+        raw_schemas = [item.get("schema")]
+    schemas = {str(value or "").strip() for value in raw_schemas if str(value or "").strip()}
+    return not schemas or "*" in schemas or str(schema_name or "").strip() in schemas
+
+
+def _hint_question_matches(item: dict[str, Any], question: str) -> bool:
+    raw_patterns = item.get("question_patterns")
+    if not isinstance(raw_patterns, list):
+        raw_patterns = [item.get("question")]
+    clean_question = str(question or "").strip()
+    for raw in raw_patterns:
+        pattern = str(raw or "").strip()
+        if pattern and (pattern in clean_question or clean_question in pattern):
+            return True
+    return False
+
+
+def _hint_to_experience(item: dict[str, Any], *, fallback_question: str) -> dict[str, Any]:
+    return {
+        "question": str(item.get("question") or fallback_question),
+        "raw_sql": str(item.get("raw_sql") or ""),
+        "table_refs": _string_list(item.get("table_refs")),
+        "column_refs": _string_list(item.get("column_refs")),
+        "row_count": _safe_int(item.get("row_count"), 0),
+        "used_count": _safe_int(item.get("used_count"), 0),
+        "guardrail_version": str(item.get("guardrail_version") or "manual_history_hint_v1"),
+        "similarity": float(item.get("similarity") or 1.0),
+        "answer_summary": str(item.get("answer_summary") or ""),
+        "source": "manual_history_hint",
+        "manual_hint": True,
+    }
+
+
+def _experience_identity(item: dict[str, Any]) -> str:
+    raw_sql = str(item.get("raw_sql") or "").strip()
+    if raw_sql:
+        return "sql:" + raw_sql.lower()
+    return "question:" + str(item.get("question") or "").strip() + "\n" + str(item.get("answer_summary") or "").strip()
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
+
+
+def _safe_int(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return fallback
 
 
 def _sql_has_school_period_filter(sql: str) -> bool:

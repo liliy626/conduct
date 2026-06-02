@@ -68,6 +68,40 @@ def test_direct_snapshot_answer_does_not_bypass_normal_analysis_request() -> Non
     assert answer == ""
 
 
+def test_scripted_handoff_answer_uses_business_markdown_without_llm(monkeypatch) -> None:
+    monkeypatch.setenv("SCHOOL_AGENT_SCRIPTED_HANDOFF_FINAL_ENABLED", "1")
+    handoff_payload = {
+        "pure_business_data_markdown": "## 学校近期异常\n\n- 心理健康特殊个案需关注",
+        "source_views": ["内部表名"],
+        "tool_contract": {"answer_mode": "data"},
+        "caveats": [
+            "数据截止至2026-06-02",
+            "handoff JSON contained internal payload",
+        ],
+    }
+
+    answer = agent_stream._scripted_handoff_answer(handoff_payload)
+
+    assert answer.startswith("## 学校近期异常")
+    assert "心理健康特殊个案需关注" in answer
+    assert "### 注意事项" in answer
+    assert "数据截止至2026-06-02" in answer
+    assert "handoff" not in answer.lower()
+    assert "内部表名" not in answer
+    assert "tool_contract" not in answer
+
+
+def test_scripted_handoff_answer_can_be_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("SCHOOL_AGENT_SCRIPTED_HANDOFF_FINAL_ENABLED", "0")
+
+    assert (
+        agent_stream._scripted_handoff_answer(
+            {"pure_business_data_markdown": "## 学校近期异常\n\n- 心理健康特殊个案需关注"}
+        )
+        == ""
+    )
+
+
 def test_handoff_payload_with_tool_evidence_restores_truth_markdown() -> None:
     tools = SimpleNamespace(
         evidence_by_task={

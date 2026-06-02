@@ -55,6 +55,7 @@ def _write_payload_safe(
             question=str(payload.get("question") or ""),
             raw_sql=str(payload.get("sql") or ""),
             row_count=int(payload.get("row_count") or 0),
+            answer_summary=str(payload.get("answer_summary") or ""),
             used_datasets=payload.get("used_datasets") if isinstance(payload.get("used_datasets"), list) else [],
             table_refs=[str(item) for item in payload.get("table_refs") or []],
             column_refs=[str(item) for item in payload.get("column_refs") or []],

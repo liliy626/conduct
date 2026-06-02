@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import time
 
-from gateway_core.agents.streaming.langgraph_event_stream import record_langgraph_event_as_trace_step
+from gateway_core.agents.streaming.langgraph_event_stream import (
+    flush_active_langgraph_llm_runs,
+    record_langgraph_event_as_trace_step,
+)
 from gateway_core.school.trace import SchoolTrace
 
 
@@ -47,3 +50,48 @@ def test_record_langgraph_event_tracks_llm_events() -> None:
     assert step.output["stream_chunk_count"] == 1
     assert step.output["usage"]["total_tokens"] == 5
     assert step.input["event"] == "on_llm_start"
+
+
+def test_final_model_filter_keeps_agent_llm_events_when_model_name_matches() -> None:
+    from gateway_core.agents.school_sql.agent_stream import _is_final_model_langgraph_event
+
+    class FinalModel:
+        model_name = "deepseek-v4-flash"
+
+    event = {
+        "event": "on_chat_model_start",
+        "metadata": {"ls_model_name": "deepseek-v4-flash"},
+    }
+
+    assert _is_final_model_langgraph_event(event, final_model=FinalModel(), final_handoff_enabled=True) is False
+
+
+def test_flush_active_langgraph_llm_runs_records_missing_end_event() -> None:
+    trace = SchoolTrace(trace_id="trace_llm_flush", question="学校最近有什么异常")
+    run_id = "run-flush"
+
+    record_langgraph_event_as_trace_step(
+        trace,
+        {
+            "event": "on_chat_model_start",
+            "run_id": run_id,
+            "metadata": {"ls_model_name": "deepseek-v4-flash"},
+            "data": {"input": {"messages": [["human", "学校最近有什么异常"]]}},
+        },
+        prefix="agent_native.langgraph",
+    )
+    time.sleep(0.001)
+    record_langgraph_event_as_trace_step(
+        trace,
+        {"event": "on_chat_model_stream", "run_id": run_id, "data": {"chunk": "查"}},
+        prefix="agent_native.langgraph",
+    )
+
+    flush_active_langgraph_llm_runs(trace, prefix="agent_native.langgraph")
+
+    assert len(trace.steps) == 1
+    step = trace.steps[0]
+    assert step.name == "agent_native.langgraph.llm"
+    assert step.output["event"] == "flushed_without_end_event"
+    assert step.output["run_id"] == run_id
+    assert step.output["stream_chunk_count"] == 1

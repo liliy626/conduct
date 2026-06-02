@@ -14,7 +14,10 @@ from langgraph.prebuilt import create_react_agent
 
 from gateway_core.api.openai_compat.chat_pipeline_parts.request_parts import build_upstream_error_text
 from gateway_core.api.openai_compat.citation_formatter import openwebui_sources_from_citation_sources
-from gateway_core.agents.streaming.langgraph_event_stream import record_langgraph_event_as_trace_step
+from gateway_core.agents.streaming.langgraph_event_stream import (
+    flush_active_langgraph_llm_runs,
+    record_langgraph_event_as_trace_step,
+)
 from gateway_core.agents.contracts import ContractPlanner, build_tool_contract
 from gateway_core.tools.langchain_tools import build_langchain_agent_tools
 from gateway_core.conversation.threading import build_langgraph_thread_id
@@ -373,6 +376,7 @@ async def stream_school_sql_agent_native(
             messages = _messages_from_event(event)
             if messages:
                 latest_messages = messages
+        flush_active_langgraph_llm_runs(trace, prefix="agent_native.langgraph")
         if final_handoff_enabled and not final_handoff_done:
             handoff_payload = _extract_final_handoff_payload(fallback_final_text)
             if not handoff_payload:
@@ -672,7 +676,10 @@ def _agent_native_prompt(
             "只调用可用工具；工具失败按返回 error 处理。",
             tool_contract_prompt or "工具合同：无。",
             "输入包含当前时间、历史 SQL、表目录和用户问题。",
-            "表目录不是字段清单；写 SQL 前用 ddl_search、inspect_table_schema 或 sample_table_rows 确认表和字段。",
+            "表目录不是字段清单；写 SQL 前先用 ddl_search 获取相关表和 candidate_evidence_packets。",
+            "若 ddl_search 返回 sql_ready=true、sql_ready_risk=low，且问题可由明确单表字段回答，"
+            "优先使用 recommended_time_field、latest_row_preview 和候选字段直接调用 sql_db_query。",
+            "只有字段含义、JSONB/数组展开、多表关联、大小写敏感列名或时间口径不明确时，才继续 inspect_table_schema/sample_table_rows，并说明原因。",
             "DDL/工具返回是硬约束；历史 SQL 只作参考。",
             "只执行当前 schema 的只读 SELECT；不得编造表、字段、数字、名单或政策。",
             "JSONB/数组字段先 sample_table_rows 或 inspect_jsonb_recordset；需要展开时用 jsonb_recordset_query。",
@@ -914,6 +921,89 @@ def _direct_snapshot_answer(*, question: str, handoff_payload: dict[str, Any]) -
     return _first_truth_data_markdown(handoff_payload).strip()
 
 
+def _scripted_handoff_answer(handoff_payload: dict[str, Any]) -> str:
+    if _env_value("SCHOOL_AGENT_SCRIPTED_HANDOFF_FINAL_ENABLED", default="1").lower() not in {"1", "true", "yes", "on"}:
+        return ""
+    if not isinstance(handoff_payload, dict):
+        return ""
+    markdown = _business_answer_markdown(handoff_payload)
+    if not markdown:
+        return ""
+    answer = _sanitize_final_answer(markdown)
+    caveats = _business_caveats(handoff_payload.get("caveats"))
+    if caveats and not _answer_already_has_caveats(answer):
+        answer = answer.rstrip() + "\n\n### 注意事项\n" + "\n".join(f"- {item}" for item in caveats)
+    return answer.strip()
+
+
+def _business_answer_markdown(handoff_payload: dict[str, Any]) -> str:
+    for key in (
+        "pure_business_data_markdown",
+        "truth_data_markdown",
+        "final_answer",
+        "answer",
+        "answer_markdown",
+        "summary_markdown",
+        "summary",
+    ):
+        value = handoff_payload.get(key)
+        if isinstance(value, str) and value.strip() and not _looks_like_internal_payload(value):
+            return value.strip()
+    return _first_truth_data_markdown(handoff_payload).strip()
+
+
+def _business_caveats(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in re.split(r"[\n;；]+", value) if item.strip()]
+    elif isinstance(value, list):
+        raw_items = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        raw_items = []
+    out: list[str] = []
+    for item in raw_items:
+        clean = _strip_internal_caveat_text(item)
+        if clean and clean not in out:
+            out.append(clean)
+    return out[:6]
+
+
+def _strip_internal_caveat_text(text: str) -> str:
+    clean = str(text or "").strip()
+    if not clean:
+        return ""
+    internal_tokens = [
+        "sql",
+        "ddl_",
+        "tool_",
+        "handoff",
+        "json",
+        "trace",
+        "langgraph",
+        "source_views",
+        "evidence_board",
+        "tool_contract",
+    ]
+    lowered = clean.lower()
+    if any(token in lowered for token in internal_tokens):
+        return ""
+    return clean
+
+
+def _looks_like_internal_payload(text: str) -> bool:
+    clean = str(text or "").strip()
+    if not clean:
+        return True
+    if clean.startswith("{") and clean.endswith("}"):
+        return True
+    lowered = clean.lower()
+    return any(token in lowered for token in ["final_answer_handoff_json", "handoff json", "tool_contract"])
+
+
+def _answer_already_has_caveats(answer: str) -> bool:
+    text = str(answer or "")
+    return any(token in text for token in ["注意事项", " caveat", "Caveat", "局限", "说明"])
+
+
 def _should_suppress_natural_answer_for_direct_snapshot(*, question: str, tools: Any) -> bool:
     del tools
     return _is_direct_snapshot_request(question)
@@ -985,6 +1075,34 @@ async def _stream_fast_final_answer(
     direct_answer = _direct_snapshot_answer(question=question, handoff_payload=handoff_payload)
     if direct_answer:
         yield direct_answer
+        return
+
+    scripted_answer = _scripted_handoff_answer(handoff_payload)
+    if scripted_answer:
+        handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
+        with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
+            set_step_output(
+                context_step,
+                {
+                    "input": {
+                        "question": question,
+                        "source_views": source_views,
+                        "handoff_chars": len(handoff_text),
+                    },
+                    "decision": {
+                        "model_name": "",
+                        "direct_snapshot": False,
+                        "scripted_handoff": True,
+                        "format_policy": "scripted_business_markdown",
+                    },
+                    "output": {
+                        "answer_chars": len(scripted_answer),
+                        "handoff_json": trace_preview(handoff_text),
+                    },
+                    "error": None,
+                },
+            )
+        yield scripted_answer
         return
 
     model = agent_model_for_tool_loop(final_model)
@@ -1188,6 +1306,33 @@ def _run_fast_final_answer_sync(
     if direct_answer:
         return direct_answer
 
+    scripted_answer = _scripted_handoff_answer(handoff_payload)
+    if scripted_answer:
+        handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
+        with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
+            set_step_output(
+                context_step,
+                {
+                    "input": {
+                        "question": question,
+                        "source_views": source_views,
+                        "handoff_chars": len(handoff_text),
+                    },
+                    "decision": {
+                        "model_name": "",
+                        "direct_snapshot": False,
+                        "scripted_handoff": True,
+                        "format_policy": "scripted_business_markdown",
+                    },
+                    "output": {
+                        "answer_chars": len(scripted_answer),
+                        "handoff_json": trace_preview(handoff_text),
+                    },
+                    "error": None,
+                },
+            )
+        return scripted_answer
+
     model = agent_model_for_tool_loop(final_model)
     first_token_ms: int | None = None
     chunk_count = 0
@@ -1373,13 +1518,11 @@ def _model_name(model: Any) -> str:
 
 
 def _is_final_model_langgraph_event(event: dict[str, Any], *, final_model: Any, final_handoff_enabled: bool) -> bool:
-    if not final_handoff_enabled or final_model is None:
-        return False
-    if str(event.get("event") or "") not in {"on_chat_model_start", "on_chat_model_stream", "on_chat_model_end", "on_chat_model_error"}:
-        return False
-    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
-    event_model = str(metadata.get("ls_model_name") or metadata.get("model_name") or metadata.get("model") or "").strip()
-    return bool(event_model and event_model == _model_name(final_model))
+    # The final answer LLM is streamed outside LangGraph and already has its own
+    # agent_native.final_fast.llm span. LangGraph chat model events here belong
+    # to the ReAct tool-planning loop, even when it uses the same model name as
+    # final_model, so filtering by model name hides the main agent latency.
+    return False
 
 
 def _enhanced_content(*, question: str, sql_experience: str, ddl_context: str, conversation_context: str = "") -> str:
@@ -1402,7 +1545,8 @@ def _enhanced_content(*, question: str, sql_experience: str, ddl_context: str, c
                 "【数据库表目录（无详细DDL）】:\n"
                 f"{startup_ddl_context}\n\n"
                 "说明：这里默认只放表名和一句话业务描述，避免每轮 Agent 调用携带全量表结构。"
-                "确定表后请调用 ddl_search 或 inspect_table_schema 动态载入当前问题需要的精确字段；"
+                "确定方向后先调用 ddl_search 动态载入候选表和 evidence packet；"
+                "若 sql_ready=true 且风险低，优先直接 sql_db_query；否则再 inspect/sample 补证。"
                 "无关表结构不要继续保留在推理中。"
             ),
             f"【用户原始问题】: {question}",
