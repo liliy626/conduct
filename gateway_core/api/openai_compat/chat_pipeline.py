@@ -599,11 +599,15 @@ def _canonical_plan_lineage_ledger_for_tenant(
 def _canonical_plan_handoff_meta_context(
     meta_context: dict[str, Any] | None,
     lineage_ledger: list[dict[str, Any]],
+    *,
+    latest_answer_context: str = "",
 ) -> dict[str, Any]:
     clean = copy.deepcopy(dict(meta_context or {}))
     for key in _PLAN_CACHE_HANDOFF_TRANSIENT_META_KEYS:
         clean.pop(key, None)
     clean["executed_sql_lineage"] = copy.deepcopy(lineage_ledger)
+    if str(latest_answer_context or "").strip():
+        clean["latest_answer_context"] = str(latest_answer_context).strip()
     return clean
 
 
@@ -771,7 +775,11 @@ async def _stream_canonical_plan_cache_then_hub(
             "messages": [*list(state.get("messages") or []), AIMessage(content=text)] if text else list(state.get("messages") or []),
             "completed_outputs": list(plan.get("required_outputs") or []),
             "visited_skills": list(result.get("visited_skills") or ["canonical_plan_cache"]),
-            "meta_context": _canonical_plan_handoff_meta_context(state.get("meta_context"), lineage_ledger),
+            "meta_context": _canonical_plan_handoff_meta_context(
+                state.get("meta_context"),
+                lineage_ledger,
+                latest_answer_context=text,
+            ),
         }
         async for chunk in _stream_experimental_shadow_hub(
             graph=graph,
@@ -868,11 +876,14 @@ def _canonical_plan_lineage(
 ) -> dict[str, Any]:
     sql_hash = hashlib.sha256(sql.encode("utf-8")).hexdigest()
     sample_payload = json.dumps(rows[:20], ensure_ascii=False, sort_keys=True, default=str)
+    row_sample = rows[:8]
     return {
         "evidence_ref_id": f"canonical_plan_{index}:{sql_hash[:12]}",
         "sql_hash": sql_hash,
         "tables_used": tables_used,
         "row_count": len(rows),
+        "row_sample": row_sample,
+        "evidence_summary": _canonical_plan_evidence_summary(rows),
         "time_range": {},
         "query_purpose": str(user_query or "").strip(),
         "sample_row_fingerprint": hashlib.md5(sample_payload.encode("utf-8")).hexdigest(),
@@ -881,6 +892,17 @@ def _canonical_plan_lineage(
             "schema_name": str(session_context.get("schema_name") or ""),
             "plan_cache": True,
         },
+    }
+
+
+def _canonical_plan_evidence_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {"truth_data_markdown": "", "top_items": [], "row_sample": []}
+    headers = list(rows[0].keys())
+    return {
+        "truth_data_markdown": _markdown_table(headers, rows[:8]),
+        "top_items": rows[:8],
+        "row_sample": rows[:8],
     }
 
 

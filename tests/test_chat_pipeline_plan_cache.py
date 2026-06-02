@@ -168,13 +168,41 @@ def test_canonical_plan_handoff_meta_context_drops_transient_stream_state() -> N
         "stable": {"items": []},
     }
 
-    cleaned = chat_pipeline._canonical_plan_handoff_meta_context(source_meta, [lineage])
+    cleaned = chat_pipeline._canonical_plan_handoff_meta_context(
+        source_meta,
+        [lineage],
+        latest_answer_context="本轮固定计划结论",
+    )
     source_meta["stable"]["items"].append("mutated")
 
     assert "thinking_buffer" not in cleaned
     assert "logs" not in cleaned
     assert cleaned["stable"] == {"items": []}
     assert cleaned["executed_sql_lineage"] == [lineage]
+    assert cleaned["latest_answer_context"] == "本轮固定计划结论"
+
+
+def test_canonical_plan_lineage_carries_truth_rows_for_visual_workers() -> None:
+    import gateway_core.api.openai_compat.chat_pipeline as chat_pipeline
+
+    rows = [
+        {"教师姓名": "张老师", "请假次数": 5},
+        {"教师姓名": "王老师", "请假次数": 3},
+    ]
+
+    lineage = chat_pipeline._canonical_plan_lineage(
+        index=1,
+        sql='SELECT "教师姓名", "请假次数" FROM t',
+        tables_used=["zx_mlh.教师销假_请假明细"],
+        rows=rows,
+        user_query="请统计教师请假排行，并画图",
+        session_context={"school_id": "sch_zx_mlh", "schema_name": "zx_mlh"},
+    )
+
+    assert lineage["row_sample"] == rows
+    assert lineage["evidence_summary"]["row_sample"] == rows
+    assert "张老师" in lineage["evidence_summary"]["truth_data_markdown"]
+    assert "请假次数" in lineage["evidence_summary"]["truth_data_markdown"]
 
 
 def test_shadow_hub_stream_clears_transactional_buffers() -> None:

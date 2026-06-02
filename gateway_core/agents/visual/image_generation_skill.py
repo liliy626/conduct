@@ -71,7 +71,7 @@ class ImageGenerationSkill(BaseMultimodalAgentSkill):
                 asyncio.to_thread(_generate_image, prompt=prompt, sql_hash=sql_hash, state=state, ctx=ctx),
                 timeout=_image_timeout_sec(ctx),
             )
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             message = "生图失败：图像生成超时，已释放后续多模态任务继续执行。"
             _record_multimodal_error(
                 ctx,
@@ -175,13 +175,21 @@ def _lineage_data_snapshot(lineage: dict[str, Any]) -> str:
     summary = lineage.get("evidence_summary")
     if isinstance(summary, dict) and summary.get("truth_data_markdown"):
         return str(summary["truth_data_markdown"])
+    if isinstance(summary, dict) and isinstance(summary.get("top_items"), list):
+        top_rows = [row for row in summary["top_items"] if isinstance(row, dict)]
+        if top_rows:
+            return _rows_to_markdown(top_rows)
     rows = lineage.get("row_sample")
     if not isinstance(rows, list) or not rows:
         return f"本次查询返回 {max(_lineage_row_count(lineage), 0)} 条真实记录。"
     clean_rows = [row for row in rows if isinstance(row, dict)]
     if not clean_rows:
         return f"本次查询返回 {max(_lineage_row_count(lineage), 0)} 条真实记录。"
-    columns = list(clean_rows[0].keys())[:6]
+    return _rows_to_markdown(clean_rows)
+
+
+def _rows_to_markdown(rows: list[dict[str, Any]]) -> str:
+    columns = list(rows[0].keys())[:6]
     lines = [
         "【真实数据快照】",
         "| " + " | ".join(_markdown_cell(column) for column in columns) + " |",
@@ -189,7 +197,7 @@ def _lineage_data_snapshot(lineage: dict[str, Any]) -> str:
     ]
     lines.extend(
         "| " + " | ".join(_markdown_cell(row.get(column)) for column in columns) + " |"
-        for row in clean_rows[:8]
+        for row in rows[:8]
     )
     return "\n".join(lines)
 
