@@ -105,6 +105,18 @@ class _PlainTeacherTeamDictAnswerFocusModel:
         )
 
 
+class _PlainFocusArrayRequiredArtifactsModel:
+    def invoke(self, _messages):
+        return _Message(
+            '{"route":"data","required_artifacts":["chart_artifact"],"allowed_tools":["chart"],'
+            '"answer_mode":"multi",'
+            '"answer_focus":[{"priority":"P0","target_content":"回答用户原问题：把本周请假数据做成交互图",'
+            '"trigger_condition":"User Request"},'
+            '{"priority":"P1","target_content":"补充请假原因分布",'
+            '"trigger_condition":"P0 查询结果包含请假原因字段时"}]}'
+        )
+
+
 def test_contract_planner_uses_plain_json_fallback_after_structured_bad_request():
     plan = ContractPlanner(_StructuredFailsPlainSucceedsModel()).plan_turn(
         question="把本周请假数据画成图",
@@ -156,7 +168,7 @@ def test_contract_planner_prompt_includes_catalog_business_history_and_memory_co
     assert "记忆/会话上下文" in prompt
     assert "上一轮问的是学校最近异常" in prompt
     assert "route=data" in prompt
-    assert "有什么是我能关心的" in prompt
+    assert "business_prompt_context" not in prompt
     assert "P0 原问题：学校有哪些业务领域" in plan.answer_focus
     assert "P1 可选扩展：按表名总结学校业务领域" in plan.answer_focus
     assert plan.route == "data"
@@ -195,7 +207,7 @@ def test_contract_planner_normalizes_unknown_route_to_data():
     assert "P1 可选扩展：基于学校运行数据找值得关注事项" in plan.answer_focus
 
 
-def test_contract_planner_prioritizes_original_work_schedule_before_expansion():
+def test_contract_planner_keeps_work_schedule_focus_generic_without_hardcoded_expansion():
     plan = ContractPlanner(_PlainOverbroadWorkScheduleModel()).plan_turn(
         question="本周学校有哪些重点工作安排？",
         available_tools=["time", "official_policy_search", "web_search"],
@@ -206,12 +218,14 @@ def test_contract_planner_prioritizes_original_work_schedule_before_expansion():
     assert plan.allowed_tools == ["time"]
     assert "P0 原问题" in plan.answer_focus
     assert "本周学校有哪些重点工作安排？" in plan.answer_focus
-    assert "首轮只查 P0" in plan.answer_focus
+    assert "P0 首轮策略" in plan.answer_focus
     assert "P1 可选扩展" in plan.answer_focus
     assert "触发条件" in plan.answer_focus
     assert "全员导师" in plan.answer_focus
     assert "AI五育" in plan.answer_focus
     assert plan.answer_focus.index("本周学校有哪些重点工作安排？") < plan.answer_focus.index("全员导师")
+    assert "日程录入" not in plan.answer_focus
+    assert "周计划" not in plan.answer_focus
     assert "official_policy_search" not in plan.allowed_tools
 
 
@@ -247,6 +261,22 @@ def test_contract_planner_prioritizes_teacher_team_question_and_ignores_role_pol
     assert "触发条件" in plan.answer_focus
     assert "角色提示词" in plan.answer_focus
     assert "official_policy_search" not in plan.allowed_tools
+
+
+def test_contract_planner_accepts_focus_array_and_required_artifacts_schema():
+    plan = ContractPlanner(_PlainFocusArrayRequiredArtifactsModel()).plan_turn(
+        question="把本周请假数据做成交互图",
+        available_tools=["chart", "time"],
+    )
+
+    assert plan.route == "data"
+    assert plan.required_outputs == ["chart_artifact"]
+    assert plan.allowed_tools == ["chart"]
+    assert plan.answer_mode == "multi"
+    assert "P0 原问题" in plan.answer_focus
+    assert "把本周请假数据做成交互图" in plan.answer_focus
+    assert "P1 可选扩展：补充请假原因分布" in plan.answer_focus
+    assert "P1 触发条件：P0 查询结果包含请假原因字段时" in plan.answer_focus
 
 
 def test_contract_planner_uses_business_prompt_to_allow_policy_evidence_tools():

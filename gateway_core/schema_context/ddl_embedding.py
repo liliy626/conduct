@@ -10,6 +10,7 @@ from gateway_core.infra.china_llm_defaults import (
     DEFAULT_CHINA_EMBED_MODEL,
     build_embedding_request_kwargs,
 )
+from gateway_core.infra.utils import env_value as _env_value
 
 try:
     from openai import OpenAI
@@ -18,17 +19,6 @@ except Exception:
 
 
 _DDL_EMBED_CLIENTS: dict[tuple[str, str, str, int], Any] = {}
-
-
-def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
-    value = os.getenv(primary, "").strip()
-    if value:
-        return value
-    if legacy:
-        value = os.getenv(legacy, "").strip()
-        if value:
-            return value
-    return default
 
 
 def _ddl_embed_client(*, dimensions: int | None = None) -> Any:

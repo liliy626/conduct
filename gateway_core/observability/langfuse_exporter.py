@@ -5,6 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Callable
 
+from gateway_core.infra.utils import truncate as _truncate_text
 from gateway_core.school.trace import SchoolTrace, SchoolTraceStep
 
 
@@ -372,7 +373,7 @@ def _final_answer_text(trace: SchoolTrace) -> str:
         for key in ("final_answer", "answer", "answer_preview", "latest_answer_context", "truth_data_markdown"):
             text = str(output.get(key) or "").strip()
             if text:
-                return _truncate(text, 12000)
+                return _truncate_text(text, 12000, suffix="\n...<truncated>", reserve=20)
     return ""
 
 
@@ -412,13 +413,6 @@ def _json_safe(value: Any) -> Any:
 
 def _display_name(name: str) -> str:
     return _DISPLAY_NAMES.get(str(name or ""), str(name or "") or "未命名步骤")
-
-
-def _truncate(text: str, limit: int) -> str:
-    clean = str(text or "")
-    if len(clean) <= limit:
-        return clean
-    return clean[: max(0, limit - 20)] + "\n...<truncated>"
 
 
 def _truthy_env(name: str, *, default: str = "0") -> bool:

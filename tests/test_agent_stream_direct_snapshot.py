@@ -22,18 +22,13 @@ def test_schema_catalog_context_compacts_teacher_leave_candidates(monkeypatch) -
 
     context = agent_stream._schema_catalog_context(schema_index, question="今天教师请假人数是多少？")
 
-    assert "强相关候选：" in context
-    assert "可能相关但需二次确认：" in context
+    assert "候选表目录：" in context
     assert "已省略" in context
     assert "zx_mlh.教师销假_请假明细" in context
-    assert "zx_mlh.教师销假_离校报备" in context
     assert "zx_mlh.考勤管理_教师请假_因公" in context
-    assert "zx_mlh.人事档案_人员信息" in context
-    assert "zx_mlh.学生评教_主课老师底表" not in context
-    assert "zx_mlh.AI五育管理平台_作品信息表" not in context
 
 
-def test_schema_catalog_context_uses_full_snapshot_for_business_domain_question(monkeypatch) -> None:
+def test_schema_catalog_context_does_not_use_business_domain_fast_path(monkeypatch) -> None:
     datasets = [
         SimpleNamespace(source_schema="zx_mlh", source_view="设备报修_报修申请", label="设备报修_报修申请", description="设备维修申请"),
         SimpleNamespace(source_schema="zx_mlh", source_view="教师销假_请假明细", label="教师销假_请假明细", description="教师请假明细"),
@@ -45,17 +40,16 @@ def test_schema_catalog_context_uses_full_snapshot_for_business_domain_question(
 
     context = agent_stream._schema_catalog_context(schema_index, question="学校有哪些业务领域？")
 
-    assert "全量业务表目录快照" in context
-    assert "通常情况下" in context
-    assert "final_answer_handoff" in context
+    assert "候选表目录：" in context
+    assert "全量业务表目录快照" not in context
+    assert "通常情况下" not in context
+    assert "final_answer_handoff" not in context
     assert "zx_mlh.设备报修_报修申请" in context
     assert "zx_mlh.教师销假_请假明细" in context
     assert "zx_mlh.公文流转_公文通知" in context
-    assert "特别严禁" not in context
-    assert "绝对禁止" not in context
 
 
-def test_enhanced_content_softly_guides_global_catalog_questions_without_hard_limits() -> None:
+def test_enhanced_content_does_not_soft_guide_global_catalog_questions() -> None:
     content = agent_stream._enhanced_content(
         question="学校有哪些业务领域？",
         sql_experience="{}",
@@ -63,13 +57,12 @@ def test_enhanced_content_softly_guides_global_catalog_questions_without_hard_li
         conversation_context="",
     )
 
-    assert "通常情况下" in content
-    assert "直接依据目录快照" in content
-    assert "特别严禁" not in content
-    assert "绝对禁止" not in content
+    assert "通常情况下" not in content
+    assert "直接依据目录快照" not in content
+    assert "final_answer_handoff" not in content
 
 
-def test_enhanced_content_hides_raw_history_sql_for_catalog_overview_question() -> None:
+def test_enhanced_content_keeps_history_context_generic() -> None:
     content = agent_stream._enhanced_content(
         question="学校有哪些业务领域？",
         sql_experience='{"experiences":[{"raw_sql":"SELECT * FROM information_schema.tables","answer_summary":"按表名归纳业务领域"}]}',
@@ -78,33 +71,10 @@ def test_enhanced_content_hides_raw_history_sql_for_catalog_overview_question() 
     )
 
     assert "按表名归纳业务领域" in content
-    assert "SELECT * FROM information_schema.tables" not in content
+    assert "SELECT * FROM information_schema.tables" in content
 
 
-def test_teacher_profile_prefetch_context_is_injected_before_react_sql() -> None:
-    queries = agent_stream._startup_ddl_prefetch_queries(
-        question="学校的整体教师画像",
-        answer_focus="从教师总数、年级分布、获奖、请假、评教等维度构建整体教师画像。",
-    )
-
-    assert queries == [
-        "人事档案_人员信息 教师 职称 学历 学科 编制 性别 年龄",
-    ]
-
-    content = agent_stream._enhanced_content(
-        question="学校的整体教师画像",
-        sql_experience="{}",
-        ddl_context="强相关候选：\n- zx_mlh.作业公示_新_教师数据: 教师数据",
-        conversation_context="",
-        prefetched_ddl_context="预取查询：作业公示_新_教师数据 教师数量 年级分布 学科分布\n候选表：zx_mlh.作业公示_新_教师数据",
-    )
-
-    assert "【启动前已预取 DDL/evidence】" in content
-    assert "可以直接基于这些 evidence 生成 sql_db_query" in content
-    assert "作业公示_新_教师数据" in content
-
-
-def test_startup_catalog_context_preserves_full_snapshot(monkeypatch) -> None:
+def test_startup_catalog_context_summarizes_catalog_generically(monkeypatch) -> None:
     snapshot = "全量业务表目录快照：\n" + "\n".join(
         f"- zx_mlh.领域{i}_业务表: 领域{i}业务，包含运行记录、配置底表、业务明细和统计汇总" for i in range(1, 80)
     )
@@ -112,42 +82,8 @@ def test_startup_catalog_context_preserves_full_snapshot(monkeypatch) -> None:
 
     context = agent_stream._startup_catalog_context_for_prompt(snapshot)
 
-    assert "zx_mlh.领域79_业务表" in context
-
-
-def test_direct_snapshot_answer_uses_truth_markdown_for_table_only_request() -> None:
-    handoff_payload = {
-        "data_evidence": {
-            "ddl_sql_query_1": {
-                "evidence_summary": {
-                    "truth_data_markdown": "【真实数据快照】\n| 年级 | 扣除总分 |\n| --- | --- |\n| 7年级 | 127.0 |",
-                    "top_items": [{"年级": "7年级", "扣除总分": 127.0}],
-                }
-            }
-        }
-    }
-
-    assert callable(getattr(agent_stream, "_direct_snapshot_answer", None))
-
-    answer = agent_stream._direct_snapshot_answer(
-        question="眼保健操时间纪律最差的年级是哪个？只输出查询结果表格。",
-        handoff_payload=handoff_payload,
-    )
-
-    assert answer == "【真实数据快照】\n| 年级 | 扣除总分 |\n| --- | --- |\n| 7年级 | 127.0 |"
-
-
-def test_direct_snapshot_answer_does_not_bypass_normal_analysis_request() -> None:
-    handoff_payload = {"truth_data_markdown": "【真实数据快照】\n| 姓名 |\n| --- |\n| 张三 |"}
-
-    assert callable(getattr(agent_stream, "_direct_snapshot_answer", None))
-
-    answer = agent_stream._direct_snapshot_answer(
-        question="帮我分析一下这批请假数据有什么风险。",
-        handoff_payload=handoff_payload,
-    )
-
-    assert answer == ""
+    assert "zx_mlh.领域79_业务表" not in context
+    assert "Table:" not in context
 
 
 def test_scripted_handoff_answer_uses_business_markdown_without_llm(monkeypatch) -> None:
@@ -259,7 +195,7 @@ def test_scripted_handoff_answer_can_be_disabled(monkeypatch) -> None:
     )
 
 
-def test_handoff_payload_with_tool_evidence_restores_truth_markdown() -> None:
+def test_handoff_payload_with_tool_evidence_restores_data_evidence() -> None:
     tools = SimpleNamespace(
         evidence_by_task={
             "ddl_sql_query_1": {
@@ -278,47 +214,6 @@ def test_handoff_payload_with_tool_evidence_restores_truth_markdown() -> None:
     )
 
     assert payload["data_evidence"] == tools.evidence_by_task
-    assert agent_stream._direct_snapshot_answer(
-        question="只输出查询结果表格",
-        handoff_payload=payload,
-    ) == "【真实数据快照】\n| 班级 |\n| --- |\n| 预备1班 |"
-
-
-def test_direct_snapshot_prefers_latest_sql_evidence_markdown() -> None:
-    handoff_payload = {
-        "data_evidence": {
-            "ddl_sql_query_1": {
-                "evidence_summary": {
-                    "truth_data_markdown": "【真实数据快照】\n| 明细 |\n| --- |\n| 流水行 |"
-                }
-            },
-            "ddl_sql_query_2": {
-                "evidence_summary": {
-                    "truth_data_markdown": "【真实数据快照】\n| 年级 | 总扣分 |\n| --- | --- |\n| 7年级 | 127 |"
-                }
-            },
-        }
-    }
-
-    assert agent_stream._direct_snapshot_answer(
-        question="只输出查询结果表格",
-        handoff_payload=handoff_payload,
-    ) == "【真实数据快照】\n| 年级 | 总扣分 |\n| --- | --- |\n| 7年级 | 127 |"
-
-
-def test_direct_snapshot_suppresses_natural_answer_after_tool_evidence() -> None:
-    tools = SimpleNamespace(evidence_by_task={"ddl_sql_query_1": {"evidence_summary": {"truth_data_markdown": "| A |\n| --- |"}}})
-
-    assert callable(getattr(agent_stream, "_should_suppress_natural_answer_for_direct_snapshot", None))
-
-    assert agent_stream._should_suppress_natural_answer_for_direct_snapshot(
-        question="只输出查询结果表格",
-        tools=tools,
-    )
-    assert not agent_stream._should_suppress_natural_answer_for_direct_snapshot(
-        question="帮我分析一下数据",
-        tools=tools,
-    )
 
 
 def test_sanitize_final_answer_removes_agent_process_preamble() -> None:
@@ -336,7 +231,7 @@ def test_sanitize_final_answer_removes_agent_process_preamble() -> None:
     assert "清晰的结构认识" not in cleaned
 
 
-def test_fast_final_answer_prompt_contains_leave_evidence_boundary() -> None:
+def test_fast_final_answer_prompt_does_not_add_boundary_notes_without_business_prompt() -> None:
     prompt = agent_stream._fast_final_answer_prompt(
         question="今天教师请假情况怎么样？",
         handoff_payload={
@@ -351,9 +246,8 @@ def test_fast_final_answer_prompt_contains_leave_evidence_boundary() -> None:
         source_views=["教师销假_请假明细"],
     )
 
-    assert "未提供课表、代课安排、考勤签到或全员在岗证据" in prompt
-    assert "不得判断课程已安排代课" in prompt
-    assert "不得判断其余教师均正常在岗" in prompt
+    assert "业务提示词/证据边界" not in prompt
+    assert "business_prompt_context" not in prompt
 
 
 def test_fast_final_answer_prompt_includes_business_prompt_context() -> None:

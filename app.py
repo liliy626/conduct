@@ -30,7 +30,7 @@ from gateway_core.api.openai_compat.chat_pipeline import run_chat_completions
 from gateway_core.agents.jobs.endpoints import router as agent_jobs_router
 from gateway_core.dashboard.component_query import (
     DashboardComponentQueryRequest,
-    route_dashboard_component_query,
+    route_dashboard_component_query_async,
 )
 from gateway_core.tools.artifact_endpoints import router as artifact_router
 from gateway_core.tools.time_endpoints import router as time_tools_router
@@ -137,9 +137,17 @@ def school_trace_detail(
 
 
 @app.post("/v1/dashboard/component-query")
-def dashboard_component_query(req: DashboardComponentQueryRequest) -> Dict[str, Any]:
+async def dashboard_component_query(
+    req: DashboardComponentQueryRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_school_scope: Optional[str] = Header(default=None, alias="X-School-Scope"),
+) -> Dict[str, Any]:
     """按大屏组件查询 SQL 与样本数据。"""
-    return route_dashboard_component_query(req)
+    return await route_dashboard_component_query_async(
+        req,
+        authorization=authorization,
+        x_school_scope=x_school_scope,
+    )
 
 
 @app.post("/v1/chat/completions", response_model=None)

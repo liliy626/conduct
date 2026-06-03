@@ -52,6 +52,7 @@ from gateway_core.agents.school_sql.sql_utils import (
     is_limited_non_aggregate_query as _is_limited_non_aggregate_query,
     json_sample_sql_hint as _json_sample_sql_hint,
     list_available_tables as _list_available_tables,
+    loads_json_object as _loads_json_object,
     load_table_ddl_summary as _load_table_ddl_summary,
     normalize_ref as _normalize_ref,
     quote_table_ref as _quote_table_ref,
@@ -64,6 +65,7 @@ from gateway_core.agents.school_sql.sql_utils import (
     truncate_text as _truncate_text,
     quote_ident as _quote_ident,
 )
+from gateway_core.infra.utils import dedupe as _dedupe
 from gateway_core.school.trace import include_sql, set_step_output, trace_preview, trace_step
 
 
@@ -1364,12 +1366,9 @@ class DDLReactTools:
             return dict(value)
         text = str(value or "").strip()
         if text.startswith("{") and text.endswith("}"):
-            try:
-                parsed = json.loads(text)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
+            parsed = _loads_json_object(text)
+            if parsed:
+                return parsed
         return {"input": text}
 
     def _analysis_rows(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1870,7 +1869,7 @@ def _build_candidate_evidence_packet(
         "recommended_time_field": recommended_time_field,
         "sql_ready": bool(sql_ready),
         "sql_ready_risk": sql_ready_risk,
-        "sql_ready_reasons": _dedupe_texts(sql_ready_reasons),
+        "sql_ready_reasons": _dedupe(sql_ready_reasons),
         "latest_row_preview": _compact_latest_row(latest_row),
         "candidate_sql_hints": _list_value(metadata, "candidate_sql_hints", "sql_hints", "query_hints"),
         "needs_inspect": needs_inspect,
@@ -2043,15 +2042,6 @@ def _metadata_bool(metadata: dict[str, Any], key: str) -> bool | None:
 
 def _latest_row_has_complex_value(row: dict[str, Any]) -> bool:
     return any(isinstance(value, (dict, list)) for value in (row or {}).values())
-
-
-def _dedupe_texts(values: list[str]) -> list[str]:
-    out: list[str] = []
-    for value in values:
-        clean = str(value or "").strip()
-        if clean and clean not in out:
-            out.append(clean)
-    return out
 
 
 def _sql_ready_risk_summary(packets: list[dict[str, Any]]) -> dict[str, int]:
@@ -2662,11 +2652,7 @@ def _json_tool_input(value: Any) -> dict[str, Any]:
         return dict(value)
     text = str(value or "").strip()
     if text.startswith("{") and text.endswith("}"):
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
+        return _loads_json_object(text)
     return {"input": text}
 
 

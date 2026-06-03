@@ -140,7 +140,7 @@ def test_query_summarizer_express_locker_lossless() -> None:
     assert "仅展示前 50 行，实际返回 120 行" in summary["truth_data_markdown"]
 
 
-def test_query_summarizer_pure_direct_snapshot_no_loss() -> None:
+def test_query_summarizer_pure_truth_data_no_loss() -> None:
     mock_raw_rows = [
         {
             "id": 1001,

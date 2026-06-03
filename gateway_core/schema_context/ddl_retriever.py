@@ -4,27 +4,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import hashlib
 import json
-import os
 import re
 import time
 from typing import Any, Callable
 
 from gateway_core.infra.db_pool import connect_db
+from gateway_core.infra.utils import env_value as _env_value
 from gateway_core.schema_context.ttl_cache import TTLCache
 
 
 _DDL_CACHE = TTLCache(max_entries=256, ttl_seconds=300)
-
-
-def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
-    value = os.getenv(primary, "").strip()
-    if value:
-        return value
-    if legacy:
-        value = os.getenv(legacy, "").strip()
-        if value:
-            return value
-    return default
 
 
 @dataclass(frozen=True)

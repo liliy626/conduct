@@ -4,12 +4,13 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
-import os
 from pathlib import Path
 import re
 import time
 import uuid
 from typing import Any, Iterator
+
+from gateway_core.infra.utils import env_value as _env_value
 
 
 @dataclass
@@ -521,17 +522,6 @@ def _store_limit() -> int:
         return max(10, min(int(raw), 1000))
     except Exception:
         return 200
-
-
-def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
-    value = os.getenv(primary, "").strip()
-    if value:
-        return value
-    if legacy:
-        value = os.getenv(legacy, "").strip()
-        if value:
-            return value
-    return default
 
 
 def _truthy_env(name: str, legacy: str = "", default: str = "0") -> bool:

@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from gateway_core.agents.school_sql.sql_utils import is_non_business_identifier, normalize_ref
 from gateway_core.school.schema_index import SchoolDatasetIndex, SchoolSchemaIndex
 
 
@@ -75,7 +76,7 @@ def validate_raw_sql(
     refs = _extract_table_refs(clean_sql)
     if not refs:
         return RawSqlGuardrailResult(False, reason="no_tenant_view_referenced", allowed_views=allowed_views)
-    unknown_refs = [ref for ref in refs if _normalize_ref(ref) not in {_normalize_ref(item) for item in allowed_views}]
+    unknown_refs = [ref for ref in refs if normalize_ref(ref) not in {normalize_ref(item) for item in allowed_views}]
     if unknown_refs:
         return RawSqlGuardrailResult(
             False,
@@ -166,10 +167,6 @@ def _unquote_identifier(value: str) -> str:
     return clean
 
 
-def _normalize_ref(value: str) -> str:
-    return ".".join(part.strip('"').lower() for part in str(value or "").replace(" ", "").split("."))
-
-
 def _schema_scope_reason(refs: list[str], *, allowed_schema: str) -> str:
     clean_allowed = str(allowed_schema or "").strip().lower()
     if not clean_allowed:
@@ -199,10 +196,10 @@ def _sensitive_field_reason(package_index: SchoolSchemaIndex, sql: str, refs: li
 
 
 def _datasets_for_refs(package_index: SchoolSchemaIndex, refs: list[str]) -> list[SchoolDatasetIndex]:
-    normalized_refs = {_normalize_ref(item) for item in refs}
+    normalized_refs = {normalize_ref(item) for item in refs}
     datasets = []
     for dataset in package_index.datasets:
-        if _normalize_ref(dataset.source_view) in normalized_refs or _normalize_ref(
+        if normalize_ref(dataset.source_view) in normalized_refs or normalize_ref(
             f"{dataset.source_schema}.{dataset.source_view}"
         ) in normalized_refs:
             datasets.append(dataset)
@@ -224,7 +221,7 @@ def _identifier_mentioned(sql: str, identifier: str) -> bool:
 
 def _non_business_field_reason(sql: str) -> str:
     for identifier in _quoted_identifiers(sql):
-        if _is_non_business_identifier(identifier):
+        if is_non_business_identifier(identifier):
             return f"non_business_field_is_not_allowed: {identifier}"
     return ""
 
@@ -236,22 +233,6 @@ def _quoted_identifiers(sql: str) -> list[str]:
         if identifier and identifier not in out:
             out.append(identifier)
     return out
-
-
-def _is_non_business_identifier(identifier: str) -> bool:
-    clean = str(identifier or "").strip()
-    lower = clean.lower()
-    if lower in {"__raw_row_json", "__raw_value_json"}:
-        return True
-    if lower.startswith("__") and lower not in {
-        "__instance_time",
-        "__created_time",
-        "__modified_time",
-        "__title",
-        "__status",
-    }:
-        return True
-    return any(token in clean for token in ["原始", "raw", "Raw", "RAW", "审批记录"])
 
 
 def _cap_limit(sql: str, *, max_limit: int) -> tuple[str, bool]:

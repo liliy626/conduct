@@ -1,20 +1,107 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any
 
+from gateway_core.infra.utils import dedupe as dedupe_strings
+from gateway_core.infra.utils import env_value
+from gateway_core.infra.utils import loads_json_object
+from gateway_core.infra.utils import truncate as _truncate
 
-def env_value(primary: str, legacy: str = "", default: str = "") -> str:
-    value = os.getenv(primary, "").strip()
-    if value:
-        return value
-    if legacy:
-        value = os.getenv(legacy, "").strip()
-        if value:
-            return value
-    return default
+
+TECHNICAL_FIELD_TOKENS = {
+    "id",
+    "uuid",
+    "tenant_id",
+    "__tenant_id",
+    "__instance_id",
+    "__form_id",
+    "__process_instance_id",
+    "__creator_id",
+    "__updater_id",
+    "source_instance_id",
+    "instance_id",
+    "form_id",
+    "process_instance_id",
+    "creator_id",
+    "updater_id",
+    "originator_user_id",
+    "originator_userid",
+    "owner_user_id",
+    "owner_userid",
+    "modifier_user_id",
+    "modifier_userid",
+    "created_at",
+    "updated_at",
+    "gmt_create",
+    "gmt_modified",
+    "gmt_create_time",
+    "gmt_modified_time",
+    "sync_time",
+    "__sync_time",
+    "deleted_flag",
+    "__deleted_flag",
+    "raw_json",
+    "__raw_json",
+    "原始json",
+    "实例id",
+    "表单id",
+    "流程实例id",
+    "租户id",
+    "同步时间",
+    "创建时间",
+    "更新时间",
+    "删除标记",
+    "内部编码",
+}
+
+TECHNICAL_FIELD_CONTAINS = (
+    "sourceinstanceid",
+    "processinstanceid",
+    "instanceid",
+    "formid",
+    "rawjson",
+    "userid",
+    "user_id",
+    "originatoruserid",
+    "owneruserid",
+    "modifieruserid",
+    "tenantid",
+    "sync",
+    "gmtcreate",
+    "gmtmodified",
+    "deletedflag",
+)
+
+NON_BUSINESS_IDENTIFIER_ALLOWLIST = {
+    "__instance_time",
+    "__created_time",
+    "__modified_time",
+    "__title",
+    "__status",
+}
+
+
+def normalized_field_token(value: str) -> str:
+    return "".join(str(value or "").strip().lower().replace("-", "_").split())
+
+
+def is_technical_field_name(value: str) -> bool:
+    normalized = normalized_field_token(value)
+    if normalized in TECHNICAL_FIELD_TOKENS:
+        return True
+    return any(token in normalized for token in TECHNICAL_FIELD_CONTAINS)
+
+
+def is_non_business_identifier(value: str) -> bool:
+    clean = str(value or "").strip()
+    lower = clean.lower()
+    if lower in {"__raw_row_json", "__raw_value_json"}:
+        return True
+    if lower.startswith("__") and lower not in NON_BUSINESS_IDENTIFIER_ALLOWLIST:
+        return True
+    return any(token in clean for token in ["原始", "raw", "Raw", "RAW", "审批记录"])
 
 
 def execute_query(*, psycopg_module: Any, dsn: str, sql: str, params: list[Any]) -> list[dict[str, Any]]:
@@ -242,7 +329,7 @@ def quote_table_ref(schema_name: str, table_name: str) -> str:
 
 
 def normalize_ref(value: str) -> str:
-    return ".".join(part.strip().strip('"').lower() for part in str(value or "").split(".") if part.strip())
+    return ".".join(part.strip().strip('"').lower() for part in str(value or "").replace(" ", "").split(".") if part.strip())
 
 
 def search_terms(query: str) -> list[str]:
@@ -264,10 +351,7 @@ def search_terms(query: str) -> list[str]:
 
 
 def truncate_text(text: str, limit: int = 1200) -> str:
-    clean = str(text or "").strip()
-    if len(clean) <= limit:
-        return clean
-    return clean[:limit].rstrip() + "...[truncated]"
+    return _truncate(text, limit, strip=True, rstrip=True)
 
 
 def format_rows(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:

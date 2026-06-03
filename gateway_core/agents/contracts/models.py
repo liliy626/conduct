@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -21,5 +21,9 @@ class PerTurnContractPlan(BaseModel):
         description="Whether this turn should be answered as plain chat or routed into the school data agent.",
     )
     answer_mode: Literal["text", "data", "image", "plot", "chart", "slide", "multi"] = "data"
-    answer_focus: str = Field(default="", description="Brief description of what the final answer should cover.")
+    answer_focus: Any = Field(default="", description="Brief description of what the final answer should cover.")
+    required_artifacts: list[str] = Field(
+        default_factory=list,
+        description="Artifact outputs requested by the compact planner schema; normalized into required_outputs.",
+    )
     reason: str = Field(default="", description="Short semantic reason for the contract.")

@@ -6,6 +6,7 @@ from decimal import Decimal
 import re
 from typing import Any
 
+from gateway_core.agents.school_sql.sql_utils import dedupe_strings as _dedupe_strings
 from gateway_core.school.schema_index import SchoolDatasetIndex, SchoolSchemaIndex
 
 
@@ -621,18 +622,6 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, tuple):
         return list(value)
     return [value]
-
-
-def _dedupe_strings(values: list[str] | tuple[str, ...]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        clean = str(value or "").strip()
-        if not clean or clean in seen:
-            continue
-        seen.add(clean)
-        out.append(clean)
-    return out
 
 
 def _normalize_signature_text(value: str) -> str:

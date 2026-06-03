@@ -7,6 +7,8 @@ from typing import Any
 
 from gateway_core.school.trace import SchoolTraceStep, include_sql, set_step_output, trace_step
 from gateway_core.runtime.runtime_trace_context import _add_trace_usage
+from gateway_core.infra.utils import safe_int as _safe_int
+from gateway_core.infra.utils import truncate as _truncate_text
 
 
 def record_langgraph_event_as_trace_step(trace: Any, event: dict[str, Any], *, prefix: str = "langgraph") -> None:
@@ -42,7 +44,7 @@ def record_langgraph_event_as_trace_step(trace: Any, event: dict[str, Any], *, p
         payload = _tool_end_payload(tool_name=tool_name, data=data)
         step_name = f"{prefix}.tool.end"
     else:
-        payload = {"tool_name": tool_name, "error": _truncate(str(data.get("error") or ""))}
+        payload = {"tool_name": tool_name, "error": _truncate_text(str(data.get("error") or ""), 800, strip=True, rstrip=True)}
         step_name = f"{prefix}.tool.error"
     with trace_step(trace, step_name, {"event": kind, "tool_name": tool_name}) as step:
         set_step_output(step, payload)
@@ -93,7 +95,7 @@ def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) 
             "stream_chunk_count": int(state.get("stream_chunk_count") or 0),
             "usage": usage,
         }
-        error = _truncate(str(data.get("error") or ""))
+        error = _truncate_text(str(data.get("error") or ""), 800, strip=True, rstrip=True)
         step = SchoolTraceStep(
             name=f"{prefix}.llm",
             status="error" if kind.endswith("_error") else "ok",
@@ -201,13 +203,6 @@ def _extract_usage(output: Any) -> dict[str, int]:
     }
 
 
-def _safe_int(value: Any) -> int:
-    try:
-        return max(0, int(value or 0))
-    except Exception:
-        return 0
-
-
 def _first_text(*values: Any) -> str:
     for value in values:
         text = str(value or "").strip()
@@ -225,9 +220,9 @@ def _tool_start_payload(*, tool_name: str, data: dict[str, Any]) -> dict[str, An
         input_preview = "<hidden>"
     return {
         "tool_name": tool_name,
-        "query": _truncate(query, 500),
-        "sql": _truncate(sql, 2000),
-        "input_preview": _truncate(input_preview, 1200),
+        "query": _truncate_text(query, 500, strip=True, rstrip=True),
+        "sql": _truncate_text(sql, 2000, strip=True, rstrip=True),
+        "input_preview": _truncate_text(input_preview, 1200, strip=True, rstrip=True),
     }
 
 
@@ -255,8 +250,8 @@ def _tool_end_payload(*, tool_name: str, data: dict[str, Any]) -> dict[str, Any]
         "table_ref": str(parsed.get("table_ref") or ""),
         "allowed": parsed.get("allowed"),
         "requires_sample": parsed.get("requires_sample"),
-        "error": _truncate(str(parsed.get("error") or "")),
-        "output_preview": _truncate(output_preview, 1200),
+        "error": _truncate_text(str(parsed.get("error") or ""), 800, strip=True, rstrip=True),
+        "output_preview": _truncate_text(output_preview, 1200, strip=True, rstrip=True),
     }
 
 
@@ -316,9 +311,3 @@ def _jsonish(value: Any) -> str:
     except Exception:
         return str(value or "")
 
-
-def _truncate(text: str, limit: int = 800) -> str:
-    clean = str(text or "").strip()
-    if len(clean) <= limit:
-        return clean
-    return clean[:limit].rstrip() + "...[truncated]"

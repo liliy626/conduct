@@ -9,6 +9,8 @@ from html import escape
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from gateway_core.infra.utils import extract_json_with_fence
+
 from .artifact_store import artifact_download_url, safe_artifact_path
 from .privacy import contains_sensitive_context
 from .tool_core import AgentTool, AgentToolInput, AgentToolOutput, ToolExecutionContext, json_safe
@@ -284,22 +286,7 @@ def _llm_slide_prompt(*, title: str, slides: List[Dict[str, Any]], charts: List[
 
 
 def _parse_json_object(content: str) -> Dict[str, Any]:
-    text = str(content or "").strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:].strip()
-    decoder = json.JSONDecoder()
-    try:
-        value, _ = decoder.raw_decode(text)
-        return value if isinstance(value, dict) else {}
-    except Exception:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            value = json.loads(text[start : end + 1])
-            return value if isinstance(value, dict) else {}
-    return {}
+    return extract_json_with_fence(content)
 
 
 def _sanitize_llm_slides(

@@ -7,21 +7,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+from gateway_core.infra.utils import env_value as _env_value
+from gateway_core.infra.utils import safe_int as _safe_int
 from gateway_core.schema_context.ttl_cache import TTLCache
 
 
 EXPERIENCE_CACHE = TTLCache(max_entries=512, ttl_seconds=300)
-
-
-def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
-    value = os.getenv(primary, "").strip()
-    if value:
-        return value
-    if legacy:
-        value = os.getenv(legacy, "").strip()
-        if value:
-            return value
-    return default
 
 
 def hash_payload(payload: dict[str, Any]) -> str:
@@ -241,13 +232,6 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if str(item or "").strip()]
-
-
-def _safe_int(value: Any, fallback: int) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return fallback
 
 
 def _sql_has_school_period_filter(sql: str) -> bool:

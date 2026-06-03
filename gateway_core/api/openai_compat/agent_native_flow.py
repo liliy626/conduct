@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 from typing import Any
 
@@ -11,17 +10,7 @@ from gateway_core.runtime import runtime_context as rt
 from gateway_core.conversation.session_memory import remember_conversation_turn
 from gateway_core.agents.school_sql.agent_stream import agent_native_enabled_for_token, stream_school_sql_agent_native
 from gateway_core.agents.policy_only.agent_stream import policy_only_agent_enabled_for_token, stream_policy_only_agent_native
-
-
-def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
-    value = os.getenv(primary, "").strip()
-    if value:
-        return value
-    if legacy:
-        value = os.getenv(legacy, "").strip()
-        if value:
-            return value
-    return default
+from gateway_core.infra.utils import env_value as _env_value
 
 
 def apply_agent_stream_process_header(request: Any) -> bool:

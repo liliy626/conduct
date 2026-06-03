@@ -9,7 +9,6 @@ from urllib import request as urllib_request
 from langchain_core.tools import StructuredTool
 
 from gateway_core.tools import (
-    BusinessPromptContextTool,
     ChartTool,
     GenerateImageTool,
     PolicyTool,
@@ -37,13 +36,12 @@ def build_langchain_agent_tools(
     tool_call_counts: dict[str, int] = {}
     tools: list[AgentTool] = _filter_agent_tools(
         [
-        TimeTool(),
-        BusinessPromptContextTool(),
-        PolicyTool(provider=policy_evidence_search_fn),
-        ChartTool(),
-        PlotTool(),
-        WebSearchTool(enabled=_truthy_env("GATEWAY_WEB_SEARCH_ENABLED", "0"), provider=_build_web_search_provider()),
-        SlideTool(),
+            TimeTool(),
+            PolicyTool(provider=policy_evidence_search_fn),
+            ChartTool(),
+            PlotTool(),
+            WebSearchTool(enabled=_truthy_env("GATEWAY_WEB_SEARCH_ENABLED", "0"), provider=_build_web_search_provider()),
+            SlideTool(),
         ],
         allowed_names=tool_policy,
     )
@@ -78,11 +76,10 @@ def _filter_agent_tools(tools: list[AgentTool], *, allowed_names: set[str]) -> l
 def _default_tool_policy() -> set[str]:
     return {
         "time",
-        "business_prompt_context",
         "official_policy_search",
-        "chart",
-        "plot",
         "web_search",
+        "plot",
+        "chart",
         "generate_image_tool",
         "slide",
     }
@@ -91,7 +88,8 @@ def _default_tool_policy() -> set[str]:
 def _tool_policy_for_contract(tool_contract: Any) -> set[str]:
     names = {"time"}
     allowed_tools = getattr(tool_contract, "allowed_tools", set()) or set()
-    names.update(str(item or "").strip() for item in allowed_tools if str(item or "").strip())
+    default_policy = _default_tool_policy()
+    names.update(str(item or "").strip() for item in allowed_tools if str(item or "").strip() in default_policy)
     required_outputs = getattr(tool_contract, "required_outputs", set()) or set()
     output_to_tool = {
         "policy_evidence": "official_policy_search",
@@ -106,7 +104,7 @@ def _tool_policy_for_contract(tool_contract: Any) -> set[str]:
         if tool_name:
             names.add(tool_name)
     if _dynamic_tool_pruning_disabled():
-        names.update(_default_tool_policy())
+        names.update(default_policy)
     return names
 
 

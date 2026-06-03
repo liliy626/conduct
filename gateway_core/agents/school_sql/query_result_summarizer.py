@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from decimal import Decimal
 from typing import Any
 
 from gateway_core.agents.school_sql.lineage_route import decide_lineage_route
+from gateway_core.agents.school_sql.sql_utils import is_technical_field_name
+from gateway_core.infra.utils import env_value as _env_value
 
 
 BAR_LINE_ROLE_PRESETS = {
@@ -21,17 +22,6 @@ BAR_LINE_ROLE_PRESETS = {
 }
 
 DOMAIN_ROLE_PRESETS = BAR_LINE_ROLE_PRESETS
-
-
-def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
-    value = os.getenv(primary, "").strip()
-    if value:
-        return value
-    if legacy:
-        value = os.getenv(legacy, "").strip()
-        if value:
-            return value
-    return default
 
 
 def summarize_query_result(
@@ -69,7 +59,7 @@ def summarize_query_result(
         "metrics": numeric_columns,
         "domain_key": domain_key,
         "domain_role_preset": DOMAIN_ROLE_PRESETS[domain_key],
-        "truth_data_markdown": _pure_truth_data_markdown(clean_rows),
+        "truth_data_markdown": _make_truth_markdown(clean_rows, default_rows=50, default_cols=15),
         "one_row_summary": one_row_summary,
         "top_items": clean_rows,
         "row_sample": clean_rows,
@@ -78,7 +68,7 @@ def summarize_query_result(
             "is_lossless": True,
             "storage_vault": "active_session_clues",
         },
-        "notable_findings": _direct_snapshot_findings(total_len),
+        "notable_findings": _truth_data_findings(total_len),
     }
     return _drop_empty(summary)
 
@@ -305,7 +295,7 @@ def _express_locker_notable_findings(
     return findings
 
 
-def _direct_snapshot_findings(row_count: int) -> list[str]:
+def _truth_data_findings(row_count: int) -> list[str]:
     if row_count <= 0:
         return ["未查询到符合条件的记录。"]
     return [f"本次查询返回 {row_count} 条记录，已按业务字段清洗后直通展示。"]
@@ -328,33 +318,18 @@ def _domain_key(
     return decision.domain_key
 
 
-def _truth_data_markdown(rows: list[dict[str, Any]]) -> str:
+def _make_truth_markdown(
+    rows: list[dict[str, Any]],
+    *,
+    default_rows: int = 50,
+    default_cols: int = 15,
+    max_rows: int = 50,
+    max_cols: int = 30,
+) -> str:
     if not rows:
         return ""
-    row_limit = _env_int("SCHOOL_REACT_TRUTH_TABLE_ROW_LIMIT", 12, min_value=1, max_value=30)
-    col_limit = _env_int("SCHOOL_REACT_TRUTH_TABLE_COL_LIMIT", 8, min_value=1, max_value=20)
-    columns = list(rows[0].keys())[:col_limit]
-    if not columns:
-        return ""
-    lines = [
-        "【真实数据快照】",
-        "| " + " | ".join(_markdown_cell(column) for column in columns) + " |",
-        "| " + " | ".join("---" for _ in columns) + " |",
-    ]
-    lines.extend(
-        "| " + " | ".join(_markdown_cell(row.get(column)) for column in columns) + " |"
-        for row in rows[:row_limit]
-    )
-    if len(rows) > row_limit:
-        lines.append(f"（仅展示前 {row_limit} 行，实际返回 {len(rows)} 行。）")
-    return "\n".join(lines)
-
-
-def _pure_truth_data_markdown(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return ""
-    row_limit = _env_int("SCHOOL_REACT_TRUTH_TABLE_ROW_LIMIT", 50, min_value=1, max_value=50)
-    col_limit = _env_int("SCHOOL_REACT_TRUTH_TABLE_COL_LIMIT", 15, min_value=1, max_value=30)
+    row_limit = _env_int("SCHOOL_REACT_TRUTH_TABLE_ROW_LIMIT", default_rows, min_value=1, max_value=max_rows)
+    col_limit = _env_int("SCHOOL_REACT_TRUTH_TABLE_COL_LIMIT", default_cols, min_value=1, max_value=max_cols)
     columns = list(rows[0].keys())[:col_limit]
     if not columns:
         return ""
@@ -408,72 +383,4 @@ def _display_row_budget() -> int:
 
 def _is_technical_field(label: str, all_labels: set[str]) -> bool:
     del all_labels
-    clean = str(label or "").strip()
-    normalized = "".join(clean.lower().replace("-", "_").split())
-    technical_tokens = {
-        "id",
-        "uuid",
-        "tenant_id",
-        "__tenant_id",
-        "__instance_id",
-        "__form_id",
-        "__process_instance_id",
-        "__creator_id",
-        "__updater_id",
-        "source_instance_id",
-        "instance_id",
-        "form_id",
-        "process_instance_id",
-        "creator_id",
-        "updater_id",
-        "originator_user_id",
-        "originator_userid",
-        "owner_user_id",
-        "owner_userid",
-        "modifier_user_id",
-        "modifier_userid",
-        "created_at",
-        "updated_at",
-        "gmt_create",
-        "gmt_modified",
-        "gmt_create_time",
-        "gmt_modified_time",
-        "sync_time",
-        "__sync_time",
-        "deleted_flag",
-        "__deleted_flag",
-        "raw_json",
-        "__raw_json",
-        "原始json",
-        "实例id",
-        "表单id",
-        "流程实例id",
-        "租户id",
-        "同步时间",
-        "创建时间",
-        "更新时间",
-        "删除标记",
-        "内部编码",
-    }
-    if normalized in technical_tokens:
-        return True
-    return any(
-        token in normalized
-        for token in [
-            "sourceinstanceid",
-            "processinstanceid",
-            "instanceid",
-            "formid",
-            "rawjson",
-            "userid",
-            "user_id",
-            "originatoruserid",
-            "owneruserid",
-            "modifieruserid",
-            "tenantid",
-            "sync",
-            "gmtcreate",
-            "gmtmodified",
-            "deletedflag",
-        ]
-    )
+    return is_technical_field_name(label)
