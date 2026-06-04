@@ -32,6 +32,7 @@ from gateway_core.dashboard.component_query import (
     DashboardComponentQueryRequest,
     route_dashboard_component_query_async,
 )
+from gateway_core.mcp.server import route_mcp_json_rpc
 from gateway_core.tools.artifact_endpoints import router as artifact_router
 from gateway_core.tools.time_endpoints import router as time_tools_router
 
@@ -148,6 +149,15 @@ async def dashboard_component_query(
         authorization=authorization,
         x_school_scope=x_school_scope,
     )
+
+
+@app.post("/mcp")
+def mcp_json_rpc(
+    payload: Dict[str, Any],
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    """Minimal MCP JSON-RPC endpoint backed by GatewayToolRegistry."""
+    return route_mcp_json_rpc(payload, authorization=authorization)
 
 
 @app.post("/v1/chat/completions", response_model=None)

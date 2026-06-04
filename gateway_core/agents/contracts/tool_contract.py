@@ -4,16 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from gateway_core.agents.contracts.models import PerTurnContractPlan
-
-
-_OPTIONAL_TOOL_OUTPUTS = {
-    "official_policy_search": "policy_evidence",
-    "web_search": "web_evidence",
-    "chart": "chart_artifact",
-    "plot": "plot_artifact",
-    "generate_image_tool": "image_artifact",
-    "slide": "slide_artifact",
-}
+from gateway_core.agents.contracts.output_contracts import OUTPUT_CONTRACT_VERSION
 
 
 @dataclass
@@ -21,6 +12,7 @@ class ToolContract:
     """Per-turn contract for required tool outputs and completion state."""
 
     question: str
+    contract_version: str = OUTPUT_CONTRACT_VERSION
     required_outputs: set[str] = field(default_factory=set)
     allowed_tools: set[str] = field(default_factory=set)
     answer_mode: str = "data"
@@ -62,6 +54,7 @@ class ToolContract:
         if not missing:
             return None
         return {
+            "contract_version": self.contract_version,
             "contract_blocked": True,
             "missing_outputs": missing,
             "message": _missing_message(missing),
@@ -83,6 +76,7 @@ class ToolContract:
 
     def trace_payload(self) -> dict[str, Any]:
         return {
+            "contract_version": self.contract_version,
             "question": self.question,
             "required_outputs": sorted(self.required_outputs),
             "allowed_tools": sorted(self.allowed_tools),
@@ -99,6 +93,7 @@ def build_tool_contract(question: str, *, plan: PerTurnContractPlan | None = Non
         plan = PerTurnContractPlan(required_outputs=[], allowed_tools=[], answer_mode="data", reason="")
     return ToolContract(
         question=str(question or ""),
+        contract_version=str(getattr(plan, "contract_version", "") or OUTPUT_CONTRACT_VERSION),
         required_outputs=set(str(item or "").strip() for item in plan.required_outputs if str(item or "").strip()),
         allowed_tools=set(str(item or "").strip() for item in plan.allowed_tools if str(item or "").strip()),
         answer_mode=str(plan.answer_mode or "data"),

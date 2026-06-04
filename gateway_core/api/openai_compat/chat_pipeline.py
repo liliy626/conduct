@@ -4,9 +4,8 @@ from __future__ import annotations
 
 The online path is intentionally small:
 
-1. policy API keys -> policy-only ReAct Agent tools
-2. school API keys -> DDL/SQL ReAct Agent tools
-3. everything else -> plain LLM chat
+1. school API keys -> DDL/SQL ReAct Agent tools
+2. everything else -> plain LLM chat
 
 Old direct-answer, controlled-plan, data-context fallback, and feature routing
 chains are intentionally not part of this orchestrator anymore.
@@ -37,16 +36,13 @@ from gateway_core.api.openai_compat import runtime_response_builders
 from gateway_core.api.openai_compat.agent_native_flow import (
     agent_native_enabled_for_token,
     apply_agent_stream_process_header,
-    policy_only_agent_enabled_for_token,
     resolve_agent_native_model,
     run_agent_native_stream,
-    run_policy_only_agent_native_stream,
 )
 from gateway_core.api.openai_compat.chat_pipeline_parts import request_parts, response_parts
 from gateway_core.api.openai_compat.pipeline_response_tools import build_pipeline_response_tools
 from gateway_core.api.openai_compat.pipeline_setup_flow import prepare_pipeline_setup
 from gateway_core.api.openai_compat.pipeline_audit import trace_pipeline_audit
-from gateway_core.api.openai_compat.policy_evidence_search import build_policy_evidence_search
 from gateway_core.prompts import prompt_domains
 from gateway_core.prompts.prompt_registry import (
     assemble_llm_messages as _pr_assemble_llm_messages,
@@ -201,11 +197,6 @@ async def run_chat_completions(
         write_question_monitor_event_fn=rt._write_question_monitor_event,
     )
 
-    policy_evidence_search_fn = build_policy_evidence_search(
-        truthy_env_fn=rt._truthy_env,
-        rag_embed_text_fn=rt._rag_embed_text,
-        psycopg_module=rt.psycopg,
-    )
     openwebui_chat_id = extract_openwebui_chat_id(req, request)
     conversation_memory_key_value = conversation_memory_key(
         chat_id=openwebui_chat_id,
@@ -231,15 +222,11 @@ async def run_chat_completions(
             response_tools=response_tools,
             runtime_response_fns=runtime_response_fns,
             openwebui_chat_id=openwebui_chat_id,
-            policy_evidence_search_fn=policy_evidence_search_fn,
             conversation_context=conversation_context,
             route_name="experimental_shadow_hub",
         )
 
-    if _is_universal_hub_ga_gating_passed(token=setup.token) and (
-        _should_use_policy_only_agent(setup.token, setup.effective_question)
-        or _should_use_school_agent(setup.token, setup.effective_question)
-    ):
+    if _is_universal_hub_ga_gating_passed(token=setup.token) and _should_use_school_agent(setup.token, setup.effective_question):
         return await _run_experimental_shadow_hub(
             request=request,
             req=req,
@@ -247,39 +234,8 @@ async def run_chat_completions(
             response_tools=response_tools,
             runtime_response_fns=runtime_response_fns,
             openwebui_chat_id=openwebui_chat_id,
-            policy_evidence_search_fn=policy_evidence_search_fn,
             conversation_context=conversation_context,
             route_name="universal_hub_ga",
-        )
-
-    if _should_use_policy_only_agent(setup.token, setup.effective_question):
-        monitor_base = setup.pipeline_ctx.monitor_base(
-            school_scope=setup.x_school_scope,
-            question=setup.effective_question,
-            last_question=setup.last_question,
-            intent_route="policy_only_agent_native",
-            route_name="policy_only_agent_native",
-            context_source="policy_only_agent_native",
-            context_present=True,
-            cache_hit=False,
-        )
-        return _streaming_sse_response(
-            run_policy_only_agent_native_stream(
-                spec=setup.spec,
-                pipeline_ctx=setup.pipeline_ctx,
-                effective_question=setup.effective_question,
-                token=setup.token,
-                completion_id=setup.completion_id,
-                openwebui_chat_id=openwebui_chat_id,
-                monitor_base=monitor_base,
-                response_tools=response_tools,
-                runtime_response_fns=runtime_response_fns,
-                model=resolve_agent_native_model(setup.client),
-                policy_evidence_search_fn=policy_evidence_search_fn,
-                conversation_context=conversation_context,
-                conversation_memory_key=conversation_memory_key_value,
-                monitor_answer_preview_fn=_monitor_answer_preview,
-            )
         )
 
     if _should_use_school_agent(setup.token, setup.effective_question):
@@ -306,7 +262,6 @@ async def run_chat_completions(
                 response_tools=response_tools,
                 runtime_response_fns=runtime_response_fns,
                 model=resolve_agent_native_model(setup.client),
-                policy_evidence_search_fn=policy_evidence_search_fn,
                 conversation_context=conversation_context,
                 conversation_memory_key=conversation_memory_key_value,
                 monitor_answer_preview_fn=_monitor_answer_preview,
@@ -318,10 +273,6 @@ async def run_chat_completions(
         response_tools=response_tools,
         runtime_response_fns=runtime_response_fns,
     )
-
-
-def _should_use_policy_only_agent(token: str, question: str) -> bool:
-    return bool(str(question or "").strip()) and policy_only_agent_enabled_for_token(token)
 
 
 def _should_use_school_agent(token: str, question: str) -> bool:
@@ -378,7 +329,6 @@ async def _run_experimental_shadow_hub(
     response_tools: Any,
     runtime_response_fns: Any,
     openwebui_chat_id: str | None,
-    policy_evidence_search_fn: Any,
     conversation_context: str,
     route_name: str = "experimental_shadow_hub",
 ):
@@ -402,7 +352,6 @@ async def _run_experimental_shadow_hub(
         request=request,
         setup=setup,
         openwebui_chat_id=openwebui_chat_id,
-        policy_evidence_search_fn=policy_evidence_search_fn,
         conversation_context=conversation_context,
     )
     config = {"configurable": {"runtime_ctx": runtime_ctx}}
@@ -1269,8 +1218,6 @@ def _experimental_shadow_required_outputs(req: ChatCompletionRequest, *, setup: 
     if out:
         return out
     if setup is not None:
-        if _should_use_policy_only_agent(setup.token, setup.effective_question):
-            return ["policy_evidence"]
         if _should_use_school_agent(setup.token, setup.effective_question):
             return ["data_evidence"]
     return out
@@ -1301,7 +1248,6 @@ def _experimental_shadow_runtime_ctx(
     request: Any,
     setup: Any,
     openwebui_chat_id: str | None,
-    policy_evidence_search_fn: Any,
     conversation_context: str,
 ) -> RuntimeContext:
     runtime_ctx = RuntimeContext(
@@ -1309,7 +1255,6 @@ def _experimental_shadow_runtime_ctx(
         token=setup.token,
         school_scope=setup.x_school_scope,
         openwebui_chat_id=openwebui_chat_id or "",
-        policy_evidence_search_fn=policy_evidence_search_fn,
         conversation_context=conversation_context,
     )
     record = rt._current_gateway_api_key_record()

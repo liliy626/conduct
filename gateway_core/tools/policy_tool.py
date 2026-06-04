@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
+from gateway_core.policy.official_policy.search_service import search_official_policy_evidence
+
 from .tool_core import AgentTool, AgentToolInput, AgentToolOutput, ToolExecutionContext, json_safe
 
 
@@ -14,7 +16,7 @@ class PolicyTool(AgentTool):
     description = "检索 official_policy 官方政策库。职称、荣誉、申报条件、年限、评审主体、一票否决、继续教育学分等问题必须调用。"
 
     def __init__(self, *, provider: PolicySearchProvider | None = None) -> None:
-        self.provider = provider
+        self.provider = provider or search_official_policy_evidence
 
     def run(self, tool_input: AgentToolInput, context: ToolExecutionContext) -> AgentToolOutput:
         started = time.perf_counter()
@@ -26,8 +28,6 @@ class PolicyTool(AgentTool):
         ).strip()
         if not query:
             return _output(started, ok=False, error="official_policy_search requires query")
-        if self.provider is None:
-            return _output(started, ok=True, warnings=["official policy provider unavailable; returning without lookup"])
         try:
             evidence = self.provider(query)
         except Exception as exc:

@@ -21,15 +21,17 @@ class UniversalHubStreamAdapter:
         composer = ResponseComposer(model_id=model_id, completion_id=completion_id)
         async for event in skill_event_stream:
             try:
-                for chunk in composer.compose_skill_event_chunks(
+                for chunk in _openai_chunks_for_event(
                     event,
+                    model_id=model_id,
+                    completion_id=completion_id,
                     stream_tool_events=stream_tool_events,
                 ):
                     yield chunk
             finally:
                 del event
         if include_done:
-            yield composer.compose_done_chunk()
+            yield _to_openai_done_chunk(composer)
             yield "data: [DONE]\n\n"
 
 
@@ -40,7 +42,24 @@ def _openai_chunks_for_event(
     completion_id: str,
     stream_tool_events: bool,
 ) -> tuple[str, ...]:
-    return ResponseComposer(
-        model_id=model_id,
-        completion_id=completion_id,
-    ).compose_skill_event_chunks(event, stream_tool_events=stream_tool_events)
+    return _to_openai_chunk(
+        ResponseComposer(
+            model_id=model_id,
+            completion_id=completion_id,
+        ),
+        event,
+        stream_tool_events=stream_tool_events,
+    )
+
+
+def _to_openai_chunk(
+    composer: ResponseComposer,
+    event: SkillEvent,
+    *,
+    stream_tool_events: bool,
+) -> tuple[str, ...]:
+    return composer.compose_skill_event_chunks(event, stream_tool_events=stream_tool_events)
+
+
+def _to_openai_done_chunk(composer: ResponseComposer) -> str:
+    return composer.compose_done_chunk()

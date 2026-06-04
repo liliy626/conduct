@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from gateway_core.agents.universal_hub.models import SkillEvent
 from gateway_core.api.openai_compat.chat_pipeline_parts import response_parts
+from gateway_core.api.openai_compat.chat_pipeline_parts.response_parts import sanitize_sources
 from gateway_core.prompts import prompt_domains
 
 
@@ -161,8 +162,7 @@ class ResponseComposer:
             "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
         }
         if sources:
-            payload["sources"] = sources
-            payload["citations"] = sources
+            payload["sources"] = sanitize_sources(sources)
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 

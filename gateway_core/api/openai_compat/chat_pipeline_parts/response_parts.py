@@ -31,8 +31,7 @@ def runtime_non_stream_response(
         "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
     if sources:
-        payload["sources"] = sources
-        payload["citations"] = sources
+        payload["sources"] = sanitize_sources(sources)
     return payload
 
 
@@ -66,8 +65,7 @@ def runtime_stream_chunk(
         "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
     }
     if sources:
-        payload["sources"] = sources
-        payload["citations"] = sources
+        payload["sources"] = sanitize_sources(sources)
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -86,9 +84,24 @@ def runtime_stream_end(
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
     }
     if sources:
-        payload["sources"] = sources
-        payload["citations"] = sources
+        payload["sources"] = sanitize_sources(sources)
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n" + "data: [DONE]\n\n"
+
+
+def sanitize_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    clean_sources: List[Dict[str, Any]] = []
+    for item in sources:
+        if not isinstance(item, dict):
+            continue
+        clean_item = dict(item)
+        source = clean_item.get("source")
+        if isinstance(source, dict):
+            clean_source = dict(source)
+            if not str(clean_source.get("url") or "").strip():
+                clean_source.pop("url", None)
+            clean_item["source"] = clean_source
+        clean_sources.append(clean_item)
+    return clean_sources
 
 
 def extract_usage(result: Any) -> Dict[str, int]:

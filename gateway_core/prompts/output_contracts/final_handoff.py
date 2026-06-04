@@ -1,0 +1,5 @@
+from __future__ import annotations
+
+from gateway_core.agents.contracts.output_contracts import final_answer_handoff_tool_description
+
+FINAL_ANSWER_HANDOFF_TOOL_DESCRIPTION = final_answer_handoff_tool_description()

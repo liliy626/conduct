@@ -4,10 +4,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from gateway_core.agents.contracts.output_contracts import OUTPUT_CONTRACT_VERSION
+
 
 class PerTurnContractPlan(BaseModel):
     """Semantic contract planned before a ReAct turn starts."""
 
+    contract_version: str = Field(
+        default=OUTPUT_CONTRACT_VERSION,
+        description="Version of the output contract that produced this plan.",
+    )
     required_outputs: list[str] = Field(
         default_factory=list,
         description="Artifacts or evidence outputs that must exist before final handoff.",

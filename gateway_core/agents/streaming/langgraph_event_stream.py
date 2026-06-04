@@ -11,7 +11,13 @@ from gateway_core.infra.utils import safe_int as _safe_int
 from gateway_core.infra.utils import truncate as _truncate_text
 
 
-def record_langgraph_event_as_trace_step(trace: Any, event: dict[str, Any], *, prefix: str = "langgraph") -> None:
+def record_langgraph_event_as_trace_step(
+    trace: Any,
+    event: dict[str, Any],
+    *,
+    prefix: str = "langgraph",
+    trace_context: dict[str, Any] | None = None,
+) -> None:
     """Record selected LangGraph runtime events as lightweight tenant trace steps.
 
     These steps are intended for user-visible process streaming. They expose
@@ -31,7 +37,7 @@ def record_langgraph_event_as_trace_step(trace: Any, event: dict[str, Any], *, p
         "on_llm_end",
         "on_llm_error",
     }:
-        _record_chat_model_event(trace, event, prefix=prefix)
+        _record_chat_model_event(trace, event, prefix=prefix, trace_context=trace_context)
         return
     if kind not in {"on_tool_start", "on_tool_end", "on_tool_error"}:
         return
@@ -46,11 +52,17 @@ def record_langgraph_event_as_trace_step(trace: Any, event: dict[str, Any], *, p
     else:
         payload = {"tool_name": tool_name, "error": _truncate_text(str(data.get("error") or ""), 800, strip=True, rstrip=True)}
         step_name = f"{prefix}.tool.error"
-    with trace_step(trace, step_name, {"event": kind, "tool_name": tool_name}) as step:
-        set_step_output(step, payload)
+    with trace_step(trace, step_name, _with_trace_context({"event": kind, "tool_name": tool_name}, trace_context)) as step:
+        set_step_output(step, _with_trace_context(payload, trace_context))
 
 
-def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) -> None:
+def _record_chat_model_event(
+    trace: Any,
+    event: dict[str, Any],
+    *,
+    prefix: str,
+    trace_context: dict[str, Any] | None = None,
+) -> None:
     if trace is None:
         return
     kind = str(event.get("event") or "").strip()
@@ -65,7 +77,8 @@ def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) 
             "started_wall_at": time.time(),
             "first_token_at": None,
             "stream_chunk_count": 0,
-            "input": _chat_model_input_payload(event),
+            "input": _with_trace_context(_chat_model_input_payload(event), trace_context),
+            "trace_context": dict(trace_context or {}),
         }
         return
     state = runs.get(run_id)
@@ -80,7 +93,8 @@ def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) 
             "started_at": now,
             "first_token_at": None,
             "stream_chunk_count": 0,
-            "input": _chat_model_input_payload(event),
+            "input": _with_trace_context(_chat_model_input_payload(event), trace_context),
+            "trace_context": dict(trace_context or {}),
         }
         duration_ms = int((now - float(state.get("started_at") or now)) * 1000)
         first_token_at = state.get("first_token_at")
@@ -95,12 +109,13 @@ def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) 
             "stream_chunk_count": int(state.get("stream_chunk_count") or 0),
             "usage": usage,
         }
+        step_trace_context = state.get("trace_context") if isinstance(state.get("trace_context"), dict) else trace_context
         error = _truncate_text(str(data.get("error") or ""), 800, strip=True, rstrip=True)
         step = SchoolTraceStep(
             name=f"{prefix}.llm",
             status="error" if kind.endswith("_error") else "ok",
             input=state.get("input") if isinstance(state.get("input"), dict) else {},
-            output=output,
+            output=_with_trace_context(output, step_trace_context),
             error=error,
             duration_ms=max(0, duration_ms),
             started_at=float(state.get("started_wall_at") or 0),
@@ -109,7 +124,12 @@ def _record_chat_model_event(trace: Any, event: dict[str, Any], *, prefix: str) 
         trace.steps.append(step)
 
 
-def flush_active_langgraph_llm_runs(trace: Any, *, prefix: str = "langgraph") -> None:
+def flush_active_langgraph_llm_runs(
+    trace: Any,
+    *,
+    prefix: str = "langgraph",
+    trace_context: dict[str, Any] | None = None,
+) -> None:
     if trace is None:
         return
     runs = _active_llm_runs(trace)
@@ -122,23 +142,35 @@ def flush_active_langgraph_llm_runs(trace: Any, *, prefix: str = "langgraph") ->
         first_token_at = state.get("first_token_at")
         duration_ms = int((now - started_at) * 1000)
         first_token_ms = int((float(first_token_at) - started_at) * 1000) if first_token_at else None
+        step_trace_context = state.get("trace_context") if isinstance(state.get("trace_context"), dict) else trace_context
         step = SchoolTraceStep(
             name=f"{prefix}.llm",
             status="ok",
             input=state.get("input") if isinstance(state.get("input"), dict) else {},
-            output={
-                "event": "flushed_without_end_event",
-                "run_id": run_id,
-                "first_token_ms": first_token_ms,
-                "stream_chunk_count": int(state.get("stream_chunk_count") or 0),
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-            },
+            output=_with_trace_context(
+                {
+                    "event": "flushed_without_end_event",
+                    "run_id": run_id,
+                    "first_token_ms": first_token_ms,
+                    "stream_chunk_count": int(state.get("stream_chunk_count") or 0),
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                },
+                step_trace_context,
+            ),
             duration_ms=max(0, duration_ms),
             started_at=float(state.get("started_wall_at") or ended_wall_at),
             ended_at=ended_wall_at,
         )
         trace.steps.append(step)
         runs.pop(run_id, None)
+
+
+def _with_trace_context(payload: dict[str, Any], trace_context: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(trace_context, dict) or not trace_context:
+        return payload
+    out = dict(payload)
+    out.update(trace_context)
+    return out
 
 
 def _active_llm_runs(trace: Any) -> dict[str, dict[str, Any]]:
@@ -310,4 +342,3 @@ def _jsonish(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
     except Exception:
         return str(value or "")
-

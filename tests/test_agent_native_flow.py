@@ -50,7 +50,6 @@ def test_agent_native_stream_sends_initial_reasoning_heartbeat(monkeypatch):
             response_tools=_ResponseTools(),
             runtime_response_fns=_RuntimeResponseFns(),
             model=object(),
-            policy_evidence_search_fn=None,
             monitor_answer_preview_fn=lambda text: str(text or "")[:20],
         )
         try:

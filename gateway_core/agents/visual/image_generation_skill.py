@@ -54,13 +54,14 @@ class ImageGenerationSkill(BaseMultimodalAgentSkill):
         yield SkillEvent(event_type="process", data={"text": f"正在绑定 SQL 证据 Hash: {sql_hash[:12]}...\n"})
         await asyncio.sleep(float(ctx.get("image_latency_sec", 0.05) or 0))
 
+        answer_context = _latest_answer_context(state, fallback=purpose)
         prompt = TripleAxisPromptSynthesizer.synthesize(
             history_messages=list(state.get("messages") or []),
             purpose=purpose,
             tables=tables,
             row_count=row_count,
-            answer_context=_latest_answer_context(state, fallback=purpose),
-            data_snapshot=_lineage_data_snapshot(evidence),
+            answer_context=answer_context,
+            data_snapshot=_lineage_data_snapshot(evidence, allow_row_sample=not _has_latest_answer_context(state)),
         )
         prompt = f"{prompt}\n数据指纹：已绑定。"
         yield SkillEvent(event_type="process", data={"text": "正在生成校园大屏可视化插图...\n"})
@@ -161,6 +162,11 @@ def _latest_answer_context(state: UniversalAgentState, *, fallback: str) -> str:
     return text or str(fallback or "校园数据分析").strip()
 
 
+def _has_latest_answer_context(state: UniversalAgentState) -> bool:
+    meta_context = state.get("meta_context") or {}
+    return bool(str(meta_context.get("latest_answer_context") or "").strip())
+
+
 def _primary_sql_lineage(lineages: list[dict[str, Any]]) -> dict[str, Any]:
     for lineage in reversed(lineages):
         if _lineage_row_count(lineage) > 0 and _lineage_tables(lineage):
@@ -171,7 +177,7 @@ def _primary_sql_lineage(lineages: list[dict[str, Any]]) -> dict[str, Any]:
     return next(reversed(lineages))
 
 
-def _lineage_data_snapshot(lineage: dict[str, Any]) -> str:
+def _lineage_data_snapshot(lineage: dict[str, Any], *, allow_row_sample: bool = True) -> str:
     summary = lineage.get("evidence_summary")
     if isinstance(summary, dict) and summary.get("truth_data_markdown"):
         return str(summary["truth_data_markdown"])
@@ -180,6 +186,8 @@ def _lineage_data_snapshot(lineage: dict[str, Any]) -> str:
         if top_rows:
             return _rows_to_markdown(top_rows)
     rows = lineage.get("row_sample")
+    if not allow_row_sample:
+        return f"本次查询返回 {max(_lineage_row_count(lineage), 0)} 条真实记录。"
     if not isinstance(rows, list) or not rows:
         return f"本次查询返回 {max(_lineage_row_count(lineage), 0)} 条真实记录。"
     clean_rows = [row for row in rows if isinstance(row, dict)]

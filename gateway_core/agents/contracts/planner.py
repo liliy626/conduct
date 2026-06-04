@@ -6,21 +6,18 @@ from typing import Any, Iterable
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from gateway_core.agents.contracts.models import PerTurnContractPlan
+from gateway_core.agents.contracts.output_contracts import ANSWER_MODES, REQUIRED_OUTPUTS, ROUTES
 from gateway_core.infra.utils import dedupe as _dedupe
 from gateway_core.infra.utils import extract_json_with_fence
+from gateway_core.prompts.agents.contract_planner import (
+    build_contract_planner_system_prompt,
+    build_contract_planner_user_prompt,
+)
 
 
-_KNOWN_OUTPUTS = {
-    "data_evidence",
-    "policy_evidence",
-    "web_evidence",
-    "chart_artifact",
-    "plot_artifact",
-    "image_artifact",
-    "slide_artifact",
-}
-_KNOWN_ANSWER_MODES = {"text", "data", "image", "plot", "chart", "slide", "multi"}
-_KNOWN_ROUTES = {"chat", "data"}
+_KNOWN_OUTPUTS = set(REQUIRED_OUTPUTS)
+_KNOWN_ANSWER_MODES = set(ANSWER_MODES)
+_KNOWN_ROUTES = set(ROUTES)
 
 
 class ContractPlanner:
@@ -46,14 +43,14 @@ class ContractPlanner:
         available_tools: Iterable[str] = (),
     ) -> PerTurnContractPlan:
         available_tool_names = _dedupe([str(item or "").strip() for item in available_tools if str(item or "").strip()])
-        system_prompt = _planner_system_prompt(available_tool_names)
-        user_prompt = _planner_user_prompt(
+        system_prompt = build_contract_planner_system_prompt(available_tool_names)
+        user_prompt = build_contract_planner_user_prompt(
             question=str(question or ""),
-            conversation_context=str(conversation_context or ""),
-            metadata_catalog_context=str(metadata_catalog_context or ""),
-            ddl_vector_context=str(ddl_vector_context or ""),
-            business_prompt_context=str(business_prompt_context or ""),
-            sql_experience_context=str(sql_experience_context or ""),
+            conversation_context=_planner_context_preview(str(conversation_context or ""), default="无"),
+            metadata_catalog_context=compact_metadata_catalog_for_contract(str(metadata_catalog_context or "")),
+            ddl_vector_context=_planner_context_preview(str(ddl_vector_context or ""), default="未提供"),
+            business_prompt_context=compact_business_prompt_for_contract(str(business_prompt_context or "")),
+            sql_experience_context=compact_sql_experience_for_contract(str(sql_experience_context or "")),
             available_tools=available_tool_names,
         )
         structured_error = ""
@@ -127,64 +124,6 @@ class ContractPlanner:
         )
 
 
-def _planner_system_prompt(available_tools: list[str]) -> str:
-    return (
-        "你是学校智能问答网关的单轮契约规划器。"
-        "你只负责本轮边界裁决：route、answer_focus、allowed_tools、required_artifacts、answer_mode。"
-        "不要生成最终答案，不要规划 SQL/DDL，不要编造事实、数字或结论。"
-        "不要扩大用户问题范围，不要因为角色提示词扩大查询范围。"
-        "只允许选择当前可用工具列表中的非 SQL 工具。"
-        f"当前可用非 SQL 工具：{', '.join(available_tools) if available_tools else '无'}。"
-    )
-
-
-def _planner_user_prompt(
-    *,
-    question: str,
-    conversation_context: str,
-    metadata_catalog_context: str,
-    ddl_vector_context: str,
-    business_prompt_context: str,
-    sql_experience_context: str,
-    available_tools: list[str],
-) -> str:
-    return "\n\n".join(
-        [
-            "请输出 PerTurnContractPlan，且只输出合法 JSON。",
-            "你只做本轮边界裁决，不回答问题，不规划 SQL/DDL。",
-            "硬约束：不要编造事实、数字、结论；不要扩大用户问题范围；不要因为角色提示词扩大查询范围。",
-            "route 规则：",
-            "- route=data：需要学校数据、表目录、历史 SQL、政策/网页/工具证据、图表、PPT、图片等完成回答。开放式学校运营问题也属于 data，例如“最近有什么值得关注”“昨天发生的事情”。",
-            "- route=chat：仅限无需学校数据、无需工具、无需政策/网页证据的普通寒暄、通用写作、翻译、泛泛解释，不得编造学校事实。",
-            "answer_focus 规则：",
-            "- answer_focus 必须是数组。",
-            "- P0 必须完整复述用户原问题，只描述本轮回答焦点，不得编造学校事实。",
-            "- 如需扩展，只能写 P1/P2；P1/P2 必须写明 trigger_condition；没有明确触发条件时不要扩展。",
-            "- 角色提示词不能自动扩大查询范围；它只影响分析角度、总结口径和建议风格。",
-            "allowed_tools 规则：",
-            "- 普通学校数据问答：allowed_tools 通常为空或仅包含 time。",
-            "- 业务提示词、元数据目录、历史 SQL 经验已经预注入规划上下文。",
-            "- 问题推理需要政策、职称、申报依据、官方规则：允许 official_policy_search。",
-            "- 问题推理需要最新公开网页、出处链接、在线来源：允许 web_search。",
-            "artifact 规则：",
-            "- PNG/保存为图片/严谨数据图：allowed_tools 包含 plot，required_artifacts 包含 plot_artifact。",
-            "- 交互式/HTML/SVG/可下载图表：allowed_tools 包含 chart，required_artifacts 包含 chart_artifact。",
-            "- 视觉图/大屏效果图/海报/宣传图/AI 生成图片/编辑图片：allowed_tools 包含 generate_image_tool，required_artifacts 包含 image_artifact。",
-            "- PPT/汇报材料/演示文稿：allowed_tools 包含 slide，required_artifacts 包含 slide_artifact。",
-            "answer_mode 规则：",
-            "- 只需要文本回答：text；需要学校数据或工具证据回答：data；同时需要多类证据或多类产物：multi。",
-            '输出 JSON Schema：{"route":"data|chat","answer_focus":[{"priority":"P0|P1|P2","target_content":"string","trigger_condition":"string"}],"allowed_tools":["time|official_policy_search|web_search|plot|chart|generate_image_tool|slide"],"required_artifacts":["plot_artifact|chart_artifact|image_artifact|slide_artifact"],"answer_mode":"text|data|multi"}',
-            f"可选工具白名单：{available_tools}",
-            f"记忆/会话上下文：{_planner_context_preview(conversation_context, default='无')}",
-            f"元数据目录快照：{compact_metadata_catalog_for_contract(metadata_catalog_context)}",
-            f"DDL 向量检索配置：{_planner_context_preview(ddl_vector_context, default='未提供')}",
-            f"业务提示词：{compact_business_prompt_for_contract(business_prompt_context)}",
-            f"历史 SQL 经验检索：{compact_sql_experience_for_contract(sql_experience_context)}",
-            f"用户最新问题：{question}",
-        ]
-    )
-
-
 def _coerce_plan(value: Any, available_tools: list[str]) -> PerTurnContractPlan:
     if isinstance(value, PerTurnContractPlan):
         plan = value
@@ -200,6 +139,7 @@ def _coerce_plan(value: Any, available_tools: list[str]) -> PerTurnContractPlan:
         if item in _KNOWN_OUTPUTS
     ]
     return PerTurnContractPlan(
+        contract_version=str(getattr(plan, "contract_version", "") or ""),
         required_outputs=required_outputs,
         allowed_tools=[item for item in _dedupe(plan.allowed_tools) if item in allowed],
         route=plan.route if plan.route in _KNOWN_ROUTES else "data",
@@ -243,6 +183,7 @@ def _enrich_plan_with_business_context(
         reason = str(plan.reason or "").strip()
         suffix = "业务提示词/用户问题触发补证工具: " + ", ".join(_dedupe(added))
         enriched = PerTurnContractPlan(
+            contract_version=plan.contract_version,
             required_outputs=[item for item in _dedupe(required_outputs) if item in _KNOWN_OUTPUTS],
             allowed_tools=[item for item in _dedupe(allowed_tools) if item in allowed_set],
             route=plan.route,
@@ -270,6 +211,7 @@ def _ensure_priority_focus(plan: PerTurnContractPlan, *, question: str) -> PerTu
     if focus.startswith("P0 原问题："):
         return plan
     return PerTurnContractPlan(
+        contract_version=plan.contract_version,
         required_outputs=plan.required_outputs,
         allowed_tools=plan.allowed_tools,
         route=plan.route,
@@ -353,6 +295,7 @@ def _sanitize_tools_by_original_question(
             continue
         filtered_outputs.append(output_name)
     return PerTurnContractPlan(
+        contract_version=plan.contract_version,
         required_outputs=[item for item in filtered_outputs if item in _KNOWN_OUTPUTS],
         allowed_tools=filtered_tools,
         route=plan.route,

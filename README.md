@@ -16,8 +16,6 @@
 OpenWebUI / 客户端
   -> app.py
   -> gateway_core.api.openai_compat.chat_pipeline
-     -> key_policy: policy_only_agent_native
-        -> web_search / official_policy_search / time
      -> school key: school_agent_native
         -> DDL 检索 / sql_db_query / 政策 / 联网 / 图表 / 图片 / PPT / 时间
      -> other key: plain LLM chat
@@ -29,7 +27,7 @@ OpenWebUI / 客户端
 
 - 学校问题默认进入 Agent-native streaming ReAct。
 - Agent 先检索当前学校 DDL，再在同一层工具中选择 `sql_db_query`、`official_policy_search`、`web_search`、`chart`、`image`、`slide`、`time` 等工具。
-- `policy_only_agent_native` 只服务 `key_type=policy` 的公开政策助手；学校 key 下的政策检索只是 `school_agent_native` 的一个工具，不是单独路由。
+- 独立 `policy_only_agent_native` 已删除；政策检索统一退回为 `official_policy_search` Tool，由工具直接查询 `official_policy` 政策库 schema。
 - `sql_db_query` 负责受控查库并把事实写入证据板（`EvidenceBoard`）；其他工具负责政策/联网/图表/视觉/PPT/时间补证。
 - School Trace Dashboard 支持 `/v1/admin/school-traces/ui`，用于查看每题的数据流、SQL、工具调用和最终答案。
 - 复杂业务问题由 Agent 自主补证，再由 LLM 结合学校数据、政策证据和工具结果整合回答。

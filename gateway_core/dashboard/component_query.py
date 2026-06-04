@@ -142,7 +142,6 @@ async def run_dashboard_component_data_agent(
             model=agent_model,
             final_model=None,
             embedding_fn=embedding_fn if embedding_fn is not None else rt._rag_embed_text,
-            policy_evidence_search_fn=None,
             openwebui_chat_id="",
             conversation_context="",
             sql_logger=None,

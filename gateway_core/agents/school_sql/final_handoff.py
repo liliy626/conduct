@@ -8,15 +8,52 @@ from typing import Any, AsyncIterator, Callable
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
 
+from gateway_core.agents.contracts.output_contracts import (
+    DIRECT_ANSWER_KEYS,
+    EVIDENCE_BOARD_KEYS,
+    EVIDENCE_LINEAGE_KEYS,
+    EVIDENCE_SUMMARY_KEYS,
+    EVIDENCE_TASK_KEYS,
+    HANDOFF_COMPACT_KEYS,
+    OUTPUT_CONTRACT_VERSION,
+)
+from gateway_core.agents.contracts.inter_agent_state import build_inter_agent_state
+from gateway_core.agents.contracts.workflow_contracts import (
+    SCHOOL_DATA_ANSWER_WORKFLOW,
+)
+from gateway_core.agents.contracts.workflow_trace import record_inter_agent_state_build
 from gateway_core.agents.school_sql.agent_model import agent_model_for_tool_loop
+from gateway_core.agents.school_sql.final_answer_trace import (
+    final_answer_messages as _final_answer_messages,
+    final_llm_trace_input as _final_llm_trace_input,
+    handoff_text as _handoff_text,
+    record_final_answer_context as _record_final_answer_context,
+    record_final_llm_output as _record_final_llm_output,
+    record_scripted_final_answer_context as _record_scripted_final_answer_context,
+)
 from gateway_core.infra.utils import chunk_text as _chunk_text
 from gateway_core.infra.utils import env_value as _env_value
 from gateway_core.infra.utils import extract_chunk_usage as _extract_chunk_usage
 from gateway_core.infra.utils import loads_json_object as _loads_json_object
-from gateway_core.infra.utils import model_name as _model_name
 from gateway_core.infra.utils import truncate as _truncate_text
-from gateway_core.runtime.runtime_trace_context import _add_trace_usage
+from gateway_core.prompts.agents.final_answer import build_final_answer_prompt, build_final_answer_system_prompt
+from gateway_core.prompts.output_contracts.final_handoff import FINAL_ANSWER_HANDOFF_TOOL_DESCRIPTION
 from gateway_core.school.trace import set_step_output, trace_preview, trace_step
+
+
+NESTED_HANDOFF_JSON_KEYS = ("summary", "final_answer", "answer", "answer_markdown", "handoff_json")
+FORMAL_FINAL_ANSWER_PATTERNS = (
+    r"以下是.{0,180}(?:完整汇报|情况|名单|分析|报告|结果)",
+    r"下面(?:是|给你|为你).{0,180}(?:汇报|情况|名单|分析|报告|结果)",
+    r"正式(?:回答|汇报|结论)[:：]?",
+)
+GENERAL_FINAL_ANSWER_PATTERNS = (
+    r"\n\s*#{1,4}\s+",
+    r"\n\s*---\s*\n",
+    r"根据(?:学校|本次|查询|数据)",
+    r"(?:本月|本学期|本年度|本周).{0,16}(?:情况|概况|分析|如下)",
+    r"(?:统计周期|数据来源)[:：]",
+)
 
 
 def final_handoff_enabled(final_model: Any) -> bool:
@@ -63,6 +100,14 @@ def handoff_payload_with_tool_evidence(handoff_payload: dict[str, Any], *, tools
     evidence_by_task = getattr(tools, "evidence_by_task", {}) or {}
     if isinstance(evidence_by_task, dict) and evidence_by_task:
         payload.setdefault("data_evidence", evidence_by_task)
+    payload.setdefault(
+        "inter_agent_state",
+        _inter_agent_state_payload(
+            question=str(payload.get("question") or ""),
+            tools=tools,
+            handoff_payload=payload,
+        ),
+    )
     return payload
 
 
@@ -87,14 +132,7 @@ def scripted_handoff_answer(handoff_payload: dict[str, Any], *, business_prompt_
 
 def business_answer_markdown(handoff_payload: dict[str, Any]) -> str:
     for payload in _business_handoff_payloads(handoff_payload):
-        for key in (
-            "pure_business_data_markdown",
-            "final_answer",
-            "answer",
-            "answer_markdown",
-            "summary_markdown",
-            "summary",
-        ):
+        for key in DIRECT_ANSWER_KEYS:
             value = payload.get(key)
             if isinstance(value, str) and value.strip() and not _looks_like_internal_payload(value):
                 return value.strip()
@@ -103,10 +141,36 @@ def business_answer_markdown(handoff_payload: dict[str, Any]) -> str:
 
 def append_business_disclaimer(answer: str, *, business_prompt_context: str = "") -> str:
     clean = str(answer or "").strip()
-    disclaimer = _business_prompt_disclaimer(business_prompt_context)
-    if not clean or not disclaimer or disclaimer in clean:
+    if not clean:
         return clean
-    return clean.rstrip() + "\n\n" + disclaimer
+    return clean + _business_disclaimer_suffix(clean, business_prompt_context=business_prompt_context)
+
+
+def _final_answer_materials(
+    *,
+    question: str,
+    handoff_payload: dict[str, Any],
+    source_views: list[str],
+    business_prompt_context: str,
+) -> dict[str, str]:
+    prompt = fast_final_answer_prompt(
+        question=question,
+        handoff_payload=handoff_payload,
+        source_views=source_views,
+        business_prompt_context=business_prompt_context,
+    )
+    return {
+        "prompt": prompt,
+        "system_prompt": fast_final_answer_system_prompt(),
+        "handoff_text": _handoff_text(handoff_payload),
+    }
+
+
+def _business_disclaimer_suffix(answer: str, *, business_prompt_context: str = "") -> str:
+    disclaimer = _business_prompt_disclaimer(business_prompt_context)
+    if not disclaimer or disclaimer in str(answer or ""):
+        return ""
+    return "\n\n" + disclaimer
 
 
 async def stream_fast_final_answer(
@@ -120,28 +184,13 @@ async def stream_fast_final_answer(
 ) -> AsyncIterator[str]:
     scripted_answer = scripted_handoff_answer(handoff_payload, business_prompt_context=business_prompt_context)
     if scripted_answer:
-        handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
-        with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
-            set_step_output(
-                context_step,
-                {
-                    "input": {
-                        "question": question,
-                        "source_views": source_views,
-                        "handoff_chars": len(handoff_text),
-                    },
-                    "decision": {
-                        "model_name": "",
-                        "scripted_handoff": True,
-                        "format_policy": "scripted_business_markdown",
-                    },
-                    "output": {
-                        "answer_chars": len(scripted_answer),
-                        "handoff_json": trace_preview(handoff_text),
-                    },
-                    "error": None,
-                },
-            )
+        _record_scripted_final_answer_context(
+            trace=trace,
+            question=question,
+            source_views=source_views,
+            handoff_payload=handoff_payload,
+            scripted_answer=scripted_answer,
+        )
         yield scripted_answer
         return
 
@@ -150,57 +199,39 @@ async def stream_fast_final_answer(
     chunk_count = 0
     answer_parts: list[str] = []
     started = datetime.now().timestamp()
-    prompt = fast_final_answer_prompt(
+    materials = _final_answer_materials(
         question=question,
         handoff_payload=handoff_payload,
         source_views=source_views,
         business_prompt_context=business_prompt_context,
     )
-    system_prompt = fast_final_answer_system_prompt()
-    handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
-    with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
-        set_step_output(
-            context_step,
-            {
-                "input": {
-                    "question": question,
-                    "source_views": source_views,
-                    "handoff_chars": len(handoff_text),
-                    "business_prompt_chars": len(str(business_prompt_context or "")),
-                },
-                "decision": {
-                    "model_name": _model_name(final_model),
-                    "format_policy": "free",
-                },
-                "output": {
-                    "handoff_json": trace_preview(handoff_text),
-                    "business_prompt_context": trace_preview(business_prompt_context),
-                    "system_prompt": trace_preview(system_prompt),
-                    "final_prompt": trace_preview(prompt),
-                },
-                "error": None,
-            },
-        )
+    prompt = materials["prompt"]
+    system_prompt = materials["system_prompt"]
+    handoff_text = materials["handoff_text"]
+    _record_final_answer_context(
+        trace=trace,
+        final_model=final_model,
+        question=question,
+        source_views=source_views,
+        handoff_text=handoff_text,
+        business_prompt_context=business_prompt_context,
+        system_prompt=system_prompt,
+        prompt=prompt,
+    )
     with trace_step(
         trace,
         "agent_native.final_fast.llm",
-        {
-            "model_name": _model_name(final_model),
-            "question": question,
-            "handoff_chars": len(handoff_text),
-            "source_views": source_views,
-            "handoff_json": trace_preview(handoff_text),
-            "business_prompt_context": trace_preview(business_prompt_context),
-            "final_prompt": trace_preview(prompt),
-        },
+        _final_llm_trace_input(
+            final_model=final_model,
+            question=question,
+            handoff_text=handoff_text,
+            source_views=source_views,
+            business_prompt_context=business_prompt_context,
+            prompt=prompt,
+        ),
     ) as step:
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        async for chunk in model.astream(
-            [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=prompt),
-            ]
-        ):
+        async for chunk in model.astream(_final_answer_messages(system_prompt=system_prompt, prompt=prompt)):
             chunk_usage = _extract_chunk_usage(chunk)
             if chunk_usage["total_tokens"] > 0:
                 usage = chunk_usage
@@ -212,21 +243,17 @@ async def stream_fast_final_answer(
             chunk_count += 1
             answer_parts.append(text)
             yield text
-        set_step_output(
+        _record_final_llm_output(
             step,
-            {
-                "model_name": _model_name(final_model),
-                "first_token_ms": first_token_ms,
-                "stream_chunk_count": chunk_count,
-                "usage": usage,
-                "final_prompt": trace_preview(prompt),
-            },
+            final_model=final_model,
+            first_token_ms=first_token_ms,
+            chunk_count=chunk_count,
+            usage=usage,
+            prompt=prompt,
         )
-        if usage["total_tokens"] > 0:
-            _add_trace_usage(usage)
-    disclaimer = _business_prompt_disclaimer(business_prompt_context)
-    if disclaimer and disclaimer not in "".join(answer_parts):
-        yield "\n\n" + disclaimer
+    suffix = _business_disclaimer_suffix("".join(answer_parts), business_prompt_context=business_prompt_context)
+    if suffix:
+        yield suffix
 
 
 def final_answer_handoff_tool(
@@ -246,6 +273,7 @@ def final_answer_handoff_tool(
             if block_payload:
                 return "FINAL_ANSWER_HANDOFF_BLOCKED: " + json.dumps(block_payload, ensure_ascii=False, default=str)
         handoff_payload = _loads_json_object(str(handoff_json or "")) or {"summary": str(handoff_json or "").strip()}
+        handoff_payload.setdefault("contract_version", OUTPUT_CONTRACT_VERSION)
         handoff_payload.setdefault("question", question)
         handoff_payload.setdefault("source_views", source_views_fn())
         if tool_contract is not None:
@@ -257,13 +285,7 @@ def final_answer_handoff_tool(
 
     return StructuredTool.from_function(
         name="final_answer_handoff",
-        description=(
-            "当你已完成必要数据查询、联网/政策检索和业务证据核验，准备交接证据时调用。"
-            "把紧凑 JSON 字符串放入 handoff_json。"
-            "不要把完整 Markdown 长答案放入 handoff_json；最终自然语言表达由 final answer 模型完成。"
-            "目录盘点类问题优先交接 business_domains/items/source_views/caveats 等结构化字段，"
-            "每项只保留名称、数量、代表性表或关键证据短语。"
-        ),
+        description=FINAL_ANSWER_HANDOFF_TOOL_DESCRIPTION,
         func=_run,
     )
 
@@ -277,6 +299,7 @@ def fallback_final_handoff_payload(*, question: str, tools: Any, caveat: str = "
     source_views = list(getattr(tools, "source_views", []) or [])
     evidence_by_task = getattr(tools, "evidence_by_task", {}) or {}
     payload = {
+        "contract_version": OUTPUT_CONTRACT_VERSION,
         "question": question,
         "data_evidence": evidence_by_task,
         "evidence_board": evidence_board,
@@ -285,7 +308,45 @@ def fallback_final_handoff_payload(*, question: str, tools: Any, caveat: str = "
         "source_views": source_views,
         "caveats": [caveat] if caveat else [],
     }
+    payload["inter_agent_state"] = _inter_agent_state_payload(
+        question=question,
+        tools=tools,
+        handoff_payload=payload,
+    )
     return payload
+
+
+def _inter_agent_state_payload(*, question: str, tools: Any, handoff_payload: dict[str, Any]) -> dict[str, Any]:
+    evidence_by_task = getattr(tools, "evidence_by_task", {}) or {}
+    if not isinstance(evidence_by_task, dict):
+        evidence_by_task = {}
+    evidence_board = handoff_payload.get("evidence_board")
+    if not isinstance(evidence_board, dict):
+        try:
+            evidence_board = tools.evidence_board_payload()
+        except Exception:
+            evidence_board = {}
+    tool_contract = handoff_payload.get("tool_contract")
+    if not isinstance(tool_contract, dict):
+        tool_contract = {}
+    state_payload = build_inter_agent_state(
+        question=str(question or handoff_payload.get("question") or ""),
+        data_evidence=evidence_by_task,
+        evidence_board=evidence_board if isinstance(evidence_board, dict) else {},
+        source_views=list(handoff_payload.get("source_views") or getattr(tools, "source_views", []) or []),
+        tool_contract=tool_contract,
+        completed_outputs=["data_evidence"] if evidence_by_task else [],
+        external_evidence=handoff_payload.get("external_evidence") if isinstance(handoff_payload.get("external_evidence"), list) else [],
+        artifacts=getattr(getattr(tools, "tool_contract", None), "artifacts", []) if hasattr(tools, "tool_contract") else [],
+        caveats=handoff_payload.get("caveats") if isinstance(handoff_payload.get("caveats"), list) else [],
+    ).model_dump()
+    record_inter_agent_state_build(
+        trace=getattr(tools, "trace", None),
+        workflow=SCHOOL_DATA_ANSWER_WORKFLOW,
+        question=str(question or handoff_payload.get("question") or ""),
+        state_payload=state_payload,
+    )
+    return state_payload
 
 
 def run_fast_final_answer_sync(
@@ -299,28 +360,13 @@ def run_fast_final_answer_sync(
 ) -> str:
     scripted_answer = scripted_handoff_answer(handoff_payload, business_prompt_context=business_prompt_context)
     if scripted_answer:
-        handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
-        with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
-            set_step_output(
-                context_step,
-                {
-                    "input": {
-                        "question": question,
-                        "source_views": source_views,
-                        "handoff_chars": len(handoff_text),
-                    },
-                    "decision": {
-                        "model_name": "",
-                        "scripted_handoff": True,
-                        "format_policy": "scripted_business_markdown",
-                    },
-                    "output": {
-                        "answer_chars": len(scripted_answer),
-                        "handoff_json": trace_preview(handoff_text),
-                    },
-                    "error": None,
-                },
-            )
+        _record_scripted_final_answer_context(
+            trace=trace,
+            question=question,
+            source_views=source_views,
+            handoff_payload=handoff_payload,
+            scripted_answer=scripted_answer,
+        )
         return scripted_answer
 
     model = agent_model_for_tool_loop(final_model)
@@ -328,57 +374,39 @@ def run_fast_final_answer_sync(
     chunk_count = 0
     started = datetime.now().timestamp()
     answer_parts: list[str] = []
-    prompt = fast_final_answer_prompt(
+    materials = _final_answer_materials(
         question=question,
         handoff_payload=handoff_payload,
         source_views=source_views,
         business_prompt_context=business_prompt_context,
     )
-    system_prompt = fast_final_answer_system_prompt()
-    handoff_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
-    with trace_step(trace, "final_answer_context", {"question": question}) as context_step:
-        set_step_output(
-            context_step,
-            {
-                "input": {
-                    "question": question,
-                    "source_views": source_views,
-                    "handoff_chars": len(handoff_text),
-                    "business_prompt_chars": len(str(business_prompt_context or "")),
-                },
-                "decision": {
-                    "model_name": _model_name(final_model),
-                    "format_policy": "free",
-                },
-                "output": {
-                    "handoff_json": trace_preview(handoff_text),
-                    "business_prompt_context": trace_preview(business_prompt_context),
-                    "system_prompt": trace_preview(system_prompt),
-                    "final_prompt": trace_preview(prompt),
-                },
-                "error": None,
-            },
-        )
+    prompt = materials["prompt"]
+    system_prompt = materials["system_prompt"]
+    handoff_text = materials["handoff_text"]
+    _record_final_answer_context(
+        trace=trace,
+        final_model=final_model,
+        question=question,
+        source_views=source_views,
+        handoff_text=handoff_text,
+        business_prompt_context=business_prompt_context,
+        system_prompt=system_prompt,
+        prompt=prompt,
+    )
     with trace_step(
         trace,
         "agent_native.final_fast.llm",
-        {
-            "model_name": _model_name(final_model),
-            "question": question,
-            "handoff_chars": len(handoff_text),
-            "source_views": source_views,
-            "handoff_json": trace_preview(handoff_text),
-            "business_prompt_context": trace_preview(business_prompt_context),
-            "final_prompt": trace_preview(prompt),
-        },
+        _final_llm_trace_input(
+            final_model=final_model,
+            question=question,
+            handoff_text=handoff_text,
+            source_views=source_views,
+            business_prompt_context=business_prompt_context,
+            prompt=prompt,
+        ),
     ) as step:
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        for chunk in model.stream(
-            [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=prompt),
-            ]
-        ):
+        for chunk in model.stream(_final_answer_messages(system_prompt=system_prompt, prompt=prompt)):
             chunk_usage = _extract_chunk_usage(chunk)
             if chunk_usage["total_tokens"] > 0:
                 usage = chunk_usage
@@ -389,28 +417,20 @@ def run_fast_final_answer_sync(
                 first_token_ms = max(0, int((datetime.now().timestamp() - started) * 1000))
             chunk_count += 1
             answer_parts.append(text)
-        set_step_output(
+        _record_final_llm_output(
             step,
-            {
-                "model_name": _model_name(final_model),
-                "first_token_ms": first_token_ms,
-                "stream_chunk_count": chunk_count,
-                "usage": usage,
-                "final_prompt": trace_preview(prompt),
-            },
+            final_model=final_model,
+            first_token_ms=first_token_ms,
+            chunk_count=chunk_count,
+            usage=usage,
+            prompt=prompt,
         )
-        if usage["total_tokens"] > 0:
-            _add_trace_usage(usage)
-    return append_business_disclaimer("".join(answer_parts), business_prompt_context=business_prompt_context)
+    answer = "".join(answer_parts)
+    return append_business_disclaimer(answer, business_prompt_context=business_prompt_context)
 
 
 def fast_final_answer_system_prompt() -> str:
-    return (
-        "你根据客观证据包回答学校数据问题。"
-        "所有数字、名单、判断、政策与来源必须来自证据，不得新增未提供的事实。"
-        "禁止向用户泄露 SQL、数据表名、工具名、Handoff JSON、内部节点名或“我先查询/我需要查看”等过程性话术。"
-        "在不改变事实的前提下，可以自由组织最终呈现方式；用自然、克制、面向学校管理者的语言，避免模板腔和生硬口号。"
-    )
+    return build_final_answer_system_prompt()
 
 
 def fast_final_answer_prompt(
@@ -420,19 +440,13 @@ def fast_final_answer_prompt(
     source_views: list[str],
     business_prompt_context: str = "",
 ) -> str:
-    style_guide = fast_final_answer_style_guide(
+    evidence_packet = fast_final_answer_style_guide(
         question=question,
         handoff_payload=handoff_payload,
         source_views=source_views,
         business_prompt_context=business_prompt_context,
     )
-    return "\n".join(
-        [
-            "客观证据包：",
-            style_guide,
-            "基于证据回答用户问题。呈现方式自由；结合业务提示词里的证据边界，用清楚、柔和、可读的学校业务语言表达；不要泄露内部结构，不要复述工具过程，不要说“根据校医院反馈”等未提供来源。",
-        ]
-    )
+    return build_final_answer_prompt(evidence_packet)
 
 
 def fast_final_answer_style_guide(
@@ -463,23 +477,7 @@ def compact_final_handoff_payload(handoff_payload: dict[str, Any]) -> dict[str, 
     if not isinstance(handoff_payload, dict):
         return {}
     compact: dict[str, Any] = {}
-    for key in (
-        "question",
-        "status",
-        "answer_focus",
-        "summary",
-        "final_answer",
-        "answer",
-        "answer_markdown",
-        "pure_business_data_markdown",
-        "business_domains",
-        "items",
-        "metrics",
-        "key_findings",
-        "caveats",
-        "source_views",
-        "external_evidence",
-    ):
+    for key in HANDOFF_COMPACT_KEYS:
         value = handoff_payload.get(key)
         if value not in (None, "", [], {}):
             compact[key] = _compact_json_value(value, max_chars=3000)
@@ -505,11 +503,11 @@ def evidence_digest(data_evidence: Any) -> list[dict[str, Any]]:
             "row_count": task.get("row_count", summary.get("row_count")),
             "referenced_views": task.get("referenced_views", summary.get("referenced_views")),
         }
-        for key in ("dataset_label", "intent", "total_row_count", "query_may_have_more", "total_count_error"):
+        for key in EVIDENCE_TASK_KEYS:
             value = task.get(key)
             if value not in (None, "", [], {}):
                 item[key] = value
-        for key in ("truth_data_markdown", "notable_findings", "top_items", "row_sample"):
+        for key in EVIDENCE_SUMMARY_KEYS:
             value = summary.get(key)
             if value not in (None, "", [], {}):
                 item[key] = _compact_json_value(value, max_chars=1800)
@@ -517,7 +515,7 @@ def evidence_digest(data_evidence: Any) -> list[dict[str, Any]]:
         if isinstance(sql_lineage, dict):
             item["sql_lineage"] = {
                 key: sql_lineage.get(key)
-                for key in ("tables_used", "row_count", "time_range")
+                for key in EVIDENCE_LINEAGE_KEYS
                 if sql_lineage.get(key) not in (None, "", [], {})
             }
         out.append({key: value for key, value in item.items() if value not in (None, "", [], {})})
@@ -530,7 +528,7 @@ def evidence_board_digest(evidence_board: Any) -> dict[str, Any]:
     if not isinstance(evidence_board, dict):
         return {}
     out: dict[str, Any] = {}
-    for key in ("business_clues", "caveats", "source_views", "tasks"):
+    for key in EVIDENCE_BOARD_KEYS:
         value = evidence_board.get(key)
         if value not in (None, "", [], {}):
             out[key] = _compact_json_value(value, max_chars=2000)
@@ -550,7 +548,7 @@ def _business_handoff_payloads(handoff_payload: dict[str, Any]) -> list[dict[str
             continue
         seen.add(identity)
         out.append(payload)
-        for key in ("summary", "final_answer", "answer", "answer_markdown", "handoff_json"):
+        for key in NESTED_HANDOFF_JSON_KEYS:
             parsed = _loads_json_object(payload.get(key))
             if parsed:
                 queue.append(parsed)
@@ -660,7 +658,7 @@ def _sanitize_final_answer(text: str) -> str:
     raw = str(text or "").strip()
     if not raw:
         return ""
-    marker_index = _formal_final_answer_marker_index(raw)
+    marker_index = _final_answer_marker_index(raw, formal_only=True)
     if marker_index < 0:
         marker_index = _final_answer_marker_index(raw)
     if marker_index > 0 and _looks_like_tool_planning_text(raw[:marker_index]):
@@ -668,31 +666,10 @@ def _sanitize_final_answer(text: str) -> str:
     return raw
 
 
-def _formal_final_answer_marker_index(text: str) -> int:
+def _final_answer_marker_index(text: str, *, formal_only: bool = False) -> int:
     candidates: list[int] = []
-    for pattern in [
-        r"以下是.{0,180}(?:完整汇报|情况|名单|分析|报告|结果)",
-        r"下面(?:是|给你|为你).{0,180}(?:汇报|情况|名单|分析|报告|结果)",
-        r"正式(?:回答|汇报|结论)[:：]?",
-    ]:
-        match = re.search(pattern, str(text or ""))
-        if match:
-            candidates.append(match.start())
-    return min(candidates) if candidates else -1
-
-
-def _final_answer_marker_index(text: str) -> int:
-    candidates: list[int] = []
-    for pattern in [
-        r"以下是.{0,180}(?:完整汇报|情况|名单|分析|报告|结果)",
-        r"下面(?:是|给你|为你).{0,180}(?:汇报|情况|名单|分析|报告|结果)",
-        r"正式(?:回答|汇报|结论)[:：]?",
-        r"\n\s*#{1,4}\s+",
-        r"\n\s*---\s*\n",
-        r"根据(?:学校|本次|查询|数据)",
-        r"(?:本月|本学期|本年度|本周).{0,16}(?:情况|概况|分析|如下)",
-        r"(?:统计周期|数据来源)[:：]",
-    ]:
+    patterns = FORMAL_FINAL_ANSWER_PATTERNS if formal_only else (*FORMAL_FINAL_ANSWER_PATTERNS, *GENERAL_FINAL_ANSWER_PATTERNS)
+    for pattern in patterns:
         match = re.search(pattern, text)
         if match:
             candidates.append(match.start())

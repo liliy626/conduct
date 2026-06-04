@@ -53,8 +53,6 @@ def _school_stream_kwargs(
         "model": session_context.get("model") or ctx.get("model"),
         "final_model": session_context.get("final_model") or ctx.get("final_model"),
         "embedding_fn": session_context.get("embedding_fn") or ctx.get("embedding_fn"),
-        "policy_evidence_search_fn": session_context.get("policy_evidence_search_fn")
-        or ctx.get("policy_evidence_search_fn"),
         "openwebui_chat_id": session_context.get("openwebui_chat_id") or ctx.get("openwebui_chat_id", ""),
         "conversation_context": session_context.get("conversation_context") or ctx.get("conversation_context", ""),
         "sql_logger": session_context.get("sql_logger") or ctx.get("sql_logger"),

@@ -9,10 +9,18 @@ from .prompt_registry import (
     build_data_format_guard,
     build_context_prompt,
     is_portrait_query,
+    render_answer_style_guard_prompt,
+    render_context_prompt,
     resolve_domain_id,
 )
+from .prompt_layer import PROMPT_REGISTRY, PromptBuilder, PromptRegistry, PromptRender, PromptTemplate
 
 __all__ = [
+    "PROMPT_REGISTRY",
+    "PromptBuilder",
+    "PromptRegistry",
+    "PromptRender",
+    "PromptTemplate",
     "apply_audience_direct_style",
     "assemble_llm_messages",
     "audience_answer_guard",
@@ -23,5 +31,7 @@ __all__ = [
     "build_data_format_guard",
     "build_context_prompt",
     "is_portrait_query",
+    "render_answer_style_guard_prompt",
+    "render_context_prompt",
     "resolve_domain_id",
 ]

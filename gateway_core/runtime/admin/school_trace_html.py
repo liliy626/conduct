@@ -396,9 +396,7 @@ def build_school_trace_dashboard_html() -> str:
       const steps = trace.steps || [];
       const tokenUsage = trace.token_usage || {};
       const packageIndex = findStep(trace, "school_schema.index").name ? findStep(trace, "school_schema.index") : findStep(trace, "package.index");
-      const agentStart = findStep(trace, "agent_native.start").name
-        ? findStep(trace, "agent_native.start")
-        : (findStep(trace, "policy_only_agent.start").name ? findStep(trace, "policy_only_agent.start") : findStep(trace, "policy_agent.start"));
+      const agentStart = findStep(trace, "agent_native.start");
       const sqlSteps = steps.filter(step => step.name === "ddl_react.tool.sql_db_query");
       const ddlSteps = steps.filter(step => step.name === "ddl_react.tool.ddl_search" || step.name === "ddl_react.tool.inspect_table_schema" || step.name === "ddl_react.tool.sample_table_rows");
       const policySteps = steps.filter(step => String(step.name || "").includes("official_policy_search"));

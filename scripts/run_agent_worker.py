@@ -20,6 +20,41 @@ from gateway_core.agents.jobs.worker import AgentJobWorker
 from gateway_core.runtime.runtime_context import psycopg
 
 
+def _is_redis_exception(exc: Exception, names: set[str]) -> bool:
+    cls = exc.__class__
+    return cls.__name__ in names and cls.__module__.startswith("redis")
+
+
+async def read_worker_messages_once(
+    client: Any,
+    *,
+    group: str,
+    consumer: str,
+    queue_stream: str,
+    capacity: int,
+    block_ms: int = 5000,
+) -> list[Any]:
+    try:
+        return await client.xreadgroup(
+            group,
+            consumer,
+            {queue_stream: ">"},
+            count=capacity,
+            block=block_ms,
+        )
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        if _is_redis_exception(exc, {"TimeoutError"}) or isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+            return []
+        raise
+    except Exception as exc:
+        if _is_redis_exception(exc, {"TimeoutError"}):
+            return []
+        if _is_redis_exception(exc, {"ConnectionError"}):
+            await asyncio.sleep(3)
+            return []
+        raise
+
+
 async def main() -> None:
     cfg = AgentJobConfig.from_env()
     queue = RedisAgentJobQueue(
@@ -71,7 +106,13 @@ async def main() -> None:
                 running.remove(task)
                 task.result()
             continue
-        result = await client.xreadgroup(group, consumer, {cfg.queue_stream: ">"}, count=capacity, block=5000)
+        result = await read_worker_messages_once(
+            client,
+            group=group,
+            consumer=consumer,
+            queue_stream=cfg.queue_stream,
+            capacity=capacity,
+        )
         if not result:
             continue
         for _, messages in result:

@@ -1,0 +1,5 @@
+from __future__ import annotations
+
+from gateway_core.agents.contracts.output_contracts import per_turn_contract_plan_schema_text
+
+PER_TURN_CONTRACT_PLAN_SCHEMA_TEXT = per_turn_contract_plan_schema_text()

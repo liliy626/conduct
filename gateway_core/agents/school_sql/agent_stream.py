@@ -16,11 +16,20 @@ from gateway_core.agents.streaming.langgraph_event_stream import (
     flush_active_langgraph_llm_runs,
     record_langgraph_event_as_trace_step,
 )
-from gateway_core.agents.contracts import ContractPlanner, build_tool_contract
-from gateway_core.agents.contracts.planner import (
-    compact_business_prompt_for_contract,
-    compact_metadata_catalog_for_contract,
-    compact_sql_experience_for_contract,
+from gateway_core.agents.contracts import build_tool_contract
+from gateway_core.agents.contracts.workflow_contracts import (
+    SCHOOL_DATA_ANSWER_WORKFLOW,
+)
+from gateway_core.agents.contracts.workflow_trace import (
+    record_workflow_start,
+    workflow_input_payload,
+    workflow_output_payload,
+    workflow_trace_context,
+)
+from gateway_core.agents.school_sql.agent_stream_contract import (
+    contract_available_tools as _contract_available_tools,
+    plan_tool_contract as _plan_tool_contract,
+    prune_tool_contract_for_disabled_tools as _prune_tool_contract_for_disabled_tools,
 )
 from gateway_core.agents.school_sql.final_handoff import (
     _append_business_disclaimer,
@@ -55,6 +64,7 @@ from gateway_core.infra.utils import extract_chunk_usage as _extract_chunk_usage
 from gateway_core.infra.utils import loads_json_object as _loads_json_object
 from gateway_core.infra.utils import model_name as _model_name
 from gateway_core.infra.utils import truncate as _truncate_text
+from gateway_core.prompts.agents.school_sql_agent import build_school_sql_agent_prompt
 from gateway_core.infra.api_keys import current_api_key_record, is_school_record
 from gateway_core.runtime.runtime_trace_context import _add_trace_usage
 from gateway_core.school.schema_indexer import build_school_schema_index
@@ -74,7 +84,6 @@ async def stream_school_sql_agent_native(
     model: Any,
     final_model: Any = None,
     embedding_fn: Callable[[str], list[float] | None] | None,
-    policy_evidence_search_fn: Callable[[str], list[dict[str, Any]]] | None = None,
     openwebui_chat_id: str = "",
     conversation_context: str = "",
     sql_logger: Callable[..., None] | None = None,
@@ -88,6 +97,7 @@ async def stream_school_sql_agent_native(
     natural-language answer.
     """
     trace = new_tenant_trace(question)
+    record_workflow_start(trace, SCHOOL_DATA_ANSWER_WORKFLOW, question=question)
     final_answer_chunks: list[str] = []
     final_answer_source = "direct_agent_content"
 
@@ -106,12 +116,16 @@ async def stream_school_sql_agent_native(
         with trace_step(
             trace,
             "school.resolve",
-            {
-                "token_present": bool(str(token or "").strip()),
-                "school_scope": school_scope or "",
-                "api_key_db_required": True,
-                "agent_native": True,
-            },
+            workflow_input_payload(
+                SCHOOL_DATA_ANSWER_WORKFLOW,
+                "route.resolve",
+                {
+                    "token_present": bool(str(token or "").strip()),
+                    "school_scope": school_scope or "",
+                    "api_key_db_required": True,
+                    "agent_native": True,
+                },
+            ),
         ) as step:
             record = _require_school_api_key_record()
             school_id = record.school_id or record.schema_name
@@ -119,12 +133,16 @@ async def stream_school_sql_agent_native(
                 trace.school_id = school_id
             set_step_output(
                 step,
-                {
-                    "school_id": school_id,
-                    "schema_name": record.schema_name,
-                    "display_name": record.display_name,
-                    "key_type": record.key_type,
-                },
+                workflow_output_payload(
+                    SCHOOL_DATA_ANSWER_WORKFLOW,
+                    "route.resolve",
+                    {
+                        "school_id": school_id,
+                        "schema_name": record.schema_name,
+                        "display_name": record.display_name,
+                        "key_type": record.key_type,
+                    },
+                ),
             )
 
         schema_index = _build_agent_schema_index(
@@ -164,21 +182,37 @@ async def stream_school_sql_agent_native(
         )
         sql_experience = tools.sql_experience_search(question)
         ddl_context = _schema_catalog_context(schema_index, question=question)
-        with trace_step(trace, "domain_context", {"question": question, "school_id": school_id}) as step:
+        with trace_step(
+            trace,
+            "domain_context",
+            workflow_input_payload(
+                SCHOOL_DATA_ANSWER_WORKFLOW,
+                "context.build_school",
+                {"question": question, "school_id": school_id},
+            ),
+        ) as step:
             set_step_output(
                 step,
-                {
-                    "input": {"question": question, "school_id": school_id, "schema_name": schema_index.source_schema},
-                    "decision": {
-                        "sql_experience_chars": len(str(sql_experience or "")),
-                        "ddl_context_chars": len(str(ddl_context or "")),
+                workflow_output_payload(
+                    SCHOOL_DATA_ANSWER_WORKFLOW,
+                    "context.build_school",
+                    {
+                        "input": {
+                            "question": question,
+                            "school_id": school_id,
+                            "schema_name": schema_index.source_schema,
+                        },
+                        "decision": {
+                            "sql_experience_chars": len(str(sql_experience or "")),
+                            "ddl_context_chars": len(str(ddl_context or "")),
+                        },
+                        "output": {
+                            "sql_experience_preview": trace_preview(sql_experience),
+                            "ddl_context_preview": trace_preview(ddl_context),
+                        },
+                        "error": None,
                     },
-                    "output": {
-                        "sql_experience_preview": trace_preview(sql_experience),
-                        "ddl_context_preview": trace_preview(ddl_context),
-                    },
-                    "error": None,
-                },
+                ),
         )
         final_handoff_enabled = _final_handoff_enabled(final_model)
         business_prompt_context = _contract_business_prompt_context(question=question, school_id=school_id)
@@ -221,18 +255,18 @@ async def stream_school_sql_agent_native(
             _record_final_answer()
             finish_trace(trace)
             return
+        disabled_tools = {str(name or "").strip() for name in disabled_tool_names if str(name or "").strip()}
         tool_contract = build_tool_contract(question, plan=contract_plan)
+        _prune_tool_contract_for_disabled_tools(tool_contract, disabled_tools)
         tool_list = [
             *tools.as_langchain_tools(),
             *build_langchain_agent_tools(
                 school_id=school_id,
                 trace=trace,
-                policy_evidence_search_fn=policy_evidence_search_fn,
                 question=question,
                 tool_contract=tool_contract,
             ),
         ]
-        disabled_tools = {str(name or "").strip() for name in disabled_tool_names if str(name or "").strip()}
         if disabled_tools:
             tool_list = [
                 tool for tool in tool_list if str(getattr(tool, "name", "") or "").strip() not in disabled_tools
@@ -306,9 +340,15 @@ async def stream_school_sql_agent_native(
         buffer_tool_planning_content = _should_buffer_tool_planning_content(model)
         final_handoff_done = False
         fallback_final_text = ""
+        react_execute_trace_context = workflow_trace_context(SCHOOL_DATA_ANSWER_WORKFLOW, "school_sql.react_execute")
         async for event in agent.astream_events({"messages": [HumanMessage(content=enhanced_content)]}, config=config, version="v2"):
             if not _is_final_model_langgraph_event(event, final_model=final_model, final_handoff_enabled=final_handoff_enabled):
-                record_langgraph_event_as_trace_step(trace, event, prefix="agent_native.langgraph")
+                record_langgraph_event_as_trace_step(
+                    trace,
+                    event,
+                    prefix="agent_native.langgraph",
+                    trace_context=react_execute_trace_context,
+                )
             _merge_citation_sources(citation_sources, _event_citation_sources(event))
             event_text = _event_visible_text(event) if _stream_tool_events_enabled() else ""
             if event_text:
@@ -413,7 +453,11 @@ async def stream_school_sql_agent_native(
             messages = _messages_from_event(event)
             if messages:
                 latest_messages = messages
-        flush_active_langgraph_llm_runs(trace, prefix="agent_native.langgraph")
+        flush_active_langgraph_llm_runs(
+            trace,
+            prefix="agent_native.langgraph",
+            trace_context=react_execute_trace_context,
+        )
         if final_handoff_enabled and not final_handoff_done:
             handoff_payload = _extract_final_handoff_payload(fallback_final_text)
             if not handoff_payload:
@@ -470,121 +514,6 @@ async def stream_school_sql_agent_native(
         yield _content_event(build_upstream_error_text(exc))
         _record_final_answer()
         finish_trace(trace)
-
-
-def _plan_tool_contract(
-    *,
-    trace: Any,
-    model: Any,
-    question: str,
-    conversation_context: str,
-    metadata_catalog_context: str = "",
-    ddl_vector_context: str = "",
-    business_prompt_context: str = "",
-    sql_experience_context: str = "",
-) -> Any:
-    available_tools = _contract_available_tools()
-    metadata_catalog_contract_preview = compact_metadata_catalog_for_contract(metadata_catalog_context)
-    business_prompt_contract_preview = compact_business_prompt_for_contract(business_prompt_context)
-    sql_experience_contract_preview = compact_sql_experience_for_contract(sql_experience_context)
-    with trace_step(
-        trace,
-        "agent_native.contract.plan",
-        {
-            "question": question,
-            "available_tools": available_tools,
-        },
-    ) as step:
-        plan = ContractPlanner(model).plan_turn(
-            question=question,
-            conversation_context=conversation_context,
-            metadata_catalog_context=metadata_catalog_context,
-            ddl_vector_context=ddl_vector_context,
-            business_prompt_context=business_prompt_context,
-            sql_experience_context=sql_experience_context,
-            available_tools=available_tools,
-        )
-        set_step_output(
-            step,
-            {
-                "input": {
-                    "question": question,
-                    "conversation_context_preview": trace_preview(conversation_context),
-                    "metadata_catalog_preview": metadata_catalog_contract_preview,
-                    "ddl_vector_preview": trace_preview(ddl_vector_context),
-                    "business_prompt_preview": business_prompt_contract_preview,
-                    "sql_experience_preview": sql_experience_contract_preview,
-                    "available_tools": available_tools,
-                },
-                "input_chars": {
-                    "conversation_context": len(str(conversation_context or "")),
-                    "metadata_catalog": len(str(metadata_catalog_context or "")),
-                    "ddl_vector": len(str(ddl_vector_context or "")),
-                    "business_prompt": len(str(business_prompt_context or "")),
-                    "sql_experience": len(str(sql_experience_context or "")),
-                },
-                "planner_input_chars": {
-                    "metadata_catalog": len(metadata_catalog_contract_preview),
-                    "business_prompt": len(business_prompt_contract_preview),
-                    "sql_experience": len(sql_experience_contract_preview),
-                },
-                "decision": {
-                    "route": getattr(plan, "route", "data"),
-                    "required_outputs": list(plan.required_outputs),
-                    "allowed_tools": list(plan.allowed_tools),
-                    "answer_mode": plan.answer_mode,
-                    "answer_focus": getattr(plan, "answer_focus", ""),
-                },
-                "output": {
-                    "reason": plan.reason,
-                },
-                "error": None,
-                "route": getattr(plan, "route", "data"),
-                "required_outputs": list(plan.required_outputs),
-                "allowed_tools": list(plan.allowed_tools),
-                "answer_mode": plan.answer_mode,
-                "answer_focus": getattr(plan, "answer_focus", ""),
-                "reason": plan.reason,
-            },
-        )
-        with trace_step(trace, "query_plan", {"question": question}) as plan_step:
-            set_step_output(
-                plan_step,
-                {
-                    "input": {
-                    "question": question,
-                    "conversation_context_preview": trace_preview(conversation_context),
-                    "metadata_catalog_preview": metadata_catalog_contract_preview,
-                    "ddl_vector_preview": trace_preview(ddl_vector_context),
-                    "business_prompt_preview": business_prompt_contract_preview,
-                    "sql_experience_preview": sql_experience_contract_preview,
-                    "available_tools": available_tools,
-                },
-                    "decision": {
-                        "route": getattr(plan, "route", "data"),
-                        "required_outputs": list(plan.required_outputs),
-                        "allowed_tools": list(plan.allowed_tools),
-                        "answer_mode": plan.answer_mode,
-                        "answer_focus": getattr(plan, "answer_focus", ""),
-                        "reason": plan.reason,
-                    },
-                    "output": {"tool_contract_seed": plan.trace_payload() if hasattr(plan, "trace_payload") else {}},
-                    "error": None,
-                },
-            )
-        return plan
-
-
-def _contract_available_tools() -> list[str]:
-    return [
-        "time",
-        "official_policy_search",
-        "web_search",
-        "plot",
-        "chart",
-        "generate_image_tool",
-        "slide",
-    ]
 
 
 def _ddl_vector_context(schema_index: Any) -> str:
@@ -776,41 +705,14 @@ def _agent_native_prompt(
     tool_contract_prompt: str = "",
 ) -> str:
     available_tools = [name for name in (available_tool_names or []) if str(name or "").strip()]
-    available_tools_text = "、".join(available_tools) if available_tools else "未提供"
-    lines = [
-            "角色：学校数据证据 Agent。",
-            f"可用工具：{available_tools_text}。",
-            "只调用可用工具；工具失败按返回 error 处理。",
-            tool_contract_prompt or "工具合同：无。",
-            "输入包含当前时间、历史 SQL、表目录和用户问题。",
-            "表目录不是字段清单；需要写 SQL 查询具体事实数据前，先用 ddl_search 获取相关表和 candidate_evidence_packets。",
-            "若 ddl_search 返回 sql_ready=true、sql_ready_risk=low，且问题可由明确单表字段回答，"
-            "优先使用 recommended_time_field、latest_row_preview 和候选字段直接调用 sql_db_query。",
-            "若工具合同/回答焦点包含 P0/P1/P2：首轮只围绕 P0 调用 ddl_search 和 SQL；"
-            "P1/P2 只有在其触发条件满足后才补查，角色提示词只影响分析角度，不能自动扩大查询范围。",
-            "只有字段含义、JSONB/数组展开、多表关联、大小写敏感列名或时间口径不明确时，才继续 inspect_table_schema/sample_table_rows，并说明原因。",
-            "DDL/工具返回是硬约束；生成 SQL 时只使用当前表 DDL/evidence/inspect 中出现的精确字段名，"
-            "不要把其他候选表或历史 SQL 的字段迁移到本表；字段没有证据时先 inspect_table_schema 修正。历史 SQL 只作参考。",
-            "只执行当前 schema 的只读 SELECT；不得编造表、字段、数字、名单或政策。",
-            "JSONB/数组字段先 sample_table_rows 或 inspect_jsonb_recordset；需要展开时用 jsonb_recordset_query。",
-            "计数按稳定 ID 去重；没有 ID 时按姓名或名称去重；不要把 row_count 直接当人数。",
-            "当前时间问题遇到 0/空结果时，先核验候选表 MAX 时间，再换候选表复查。",
-            "统计、趋势、排名优先聚合 SQL；明细或完整名单按 has_more/OFFSET 翻页，并把未查全写入 caveats。",
-            "只有用户明确要求时才调用联网、政策、图表、图片或 PPT 工具。",
-            "外部原因先查校内数据，再用公开证据补证；没有证据就写 caveats。",
-            f"学校：{schema_index.school_id} / {schema_index.school_name}；schema：{schema_index.source_schema}。",
-    ]
-    if final_handoff_enabled:
-        lines.insert(
-            -2,
-            (
-                "完成必要查询后调用 final_answer_handoff 交接 JSON；不要直接输出长答案。"
-                "JSON 优先包含 result_id、row_count、business_domains/items、source_views、caveats。"
-                "不要把完整 Markdown 长答案放入 handoff_json；最终自然表达由 final answer 模型完成。"
-                "不要包含个人敏感明细。"
-            ),
-        )
-    return "\n".join(lines)
+    return build_school_sql_agent_prompt(
+        available_tool_names=available_tools,
+        tool_contract_prompt=tool_contract_prompt,
+        school_id=str(schema_index.school_id),
+        school_name=str(schema_index.school_name),
+        source_schema=str(schema_index.source_schema),
+        final_handoff_enabled=final_handoff_enabled,
+    )
 
 
 def _should_buffer_tool_planning_content(model: Any) -> bool:

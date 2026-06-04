@@ -214,6 +214,9 @@ def test_handoff_payload_with_tool_evidence_restores_data_evidence() -> None:
     )
 
     assert payload["data_evidence"] == tools.evidence_by_task
+    assert payload["inter_agent_state"]["data_evidence"]["ddl_sql_query_1"]["ref"]["id"].startswith(
+        "task:ddl_sql_query_1"
+    )
 
 
 def test_sanitize_final_answer_removes_agent_process_preamble() -> None:
@@ -342,6 +345,7 @@ def test_fallback_handoff_payload_has_no_suggested_structure() -> None:
     assert "conclusion" not in payload
     assert "key_facts" not in payload
     assert "pure_business_data_markdown" in payload
+    assert payload["inter_agent_state"]["question"] == "学校整体概况怎么样？"
 
 
 def test_policy_tool_end_sources_become_openwebui_citation_bubbles() -> None:
