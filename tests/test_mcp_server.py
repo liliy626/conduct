@@ -32,7 +32,9 @@ def test_mcp_tools_call_uses_registry_only() -> None:
 
     result = response["result"]
     assert result["isError"] is False
-    assert result["structuredContent"]["message"] == "ok"
+    assert result["structuredContent"]["ok"] is True
+    assert result["structuredContent"]["structured_content"]["message"] == "ok"
+    assert set(GATEWAY_TOOL_RESULT_SCHEMA["properties"]).issubset(result["structuredContent"])
 
 
 @dataclass

@@ -37,7 +37,7 @@ def mcp_call_tool(
     content_text = str(payload.get("error") or "") if not output.ok else _summary_text(payload)
     return {
         "content": [{"type": "text", "text": content_text}],
-        "structuredContent": payload.get("structured_content") or payload,
+        "structuredContent": payload,
         "isError": not bool(output.ok),
     }
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from gateway_core.agents.contracts.inter_agent_state import validate_data_evidence_payload
 from gateway_core.agents.contracts.models import PerTurnContractPlan
 from gateway_core.agents.contracts.output_contracts import OUTPUT_CONTRACT_VERSION
 
@@ -48,6 +49,9 @@ class ToolContract:
             _has_artifact(payload, artifact_type) for artifact_type in ("pptx", "slide_preview", "deck_source")
         ):
             self.completed_outputs.add("slide_artifact")
+        if tool_name in {"sql_db_query", "jsonb_recordset_query"}:
+            validate_data_evidence_payload(payload)
+            self.completed_outputs.add("data_evidence")
 
     def handoff_block_payload(self) -> dict[str, Any] | None:
         missing = self.missing_outputs()

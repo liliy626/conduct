@@ -22,6 +22,14 @@ class WebSearchTool(AgentTool):
     def run(self, tool_input: AgentToolInput, context: ToolExecutionContext) -> AgentToolOutput:
         started = time.perf_counter()
         query = str(tool_input.arguments.get("query") or tool_input.arguments.get("input") or "").strip()
+        if not query:
+            return _output(
+                started,
+                ok=False,
+                error="invalid_input: web_search requires query",
+                evidence=[_status_evidence("invalid_input", query=query, attempted_external_call=False)],
+            )
+
         blocked, reason = _query_has_sensitive_person(query)
         if not blocked:
             blocked, reason = contains_sensitive_context(_privacy_context(tool_input.arguments))
@@ -30,33 +38,67 @@ class WebSearchTool(AgentTool):
                 started,
                 ok=False,
                 warnings=[f"privacy block: {reason}; external web search was not called"],
-                error="sensitive context cannot be sent to web search",
+                error="privacy_blocked: sensitive context cannot be sent to web search",
+                evidence=[
+                    _status_evidence(
+                        "privacy_blocked",
+                        query=query,
+                        attempted_external_call=False,
+                        reason=reason,
+                    )
+                ],
             )
 
         if not self.enabled:
             return _output(
                 started,
-                ok=True,
+                ok=False,
                 warnings=["web search disabled; returning without external lookup"],
+                error="disabled: web search is disabled",
+                evidence=[_status_evidence("disabled", query=query, attempted_external_call=False)],
             )
         if self.provider is None:
             return _output(
                 started,
-                ok=True,
+                ok=False,
                 warnings=["web search provider unavailable; returning without external lookup"],
+                error="provider_unavailable: web search provider unavailable",
+                evidence=[
+                    _status_evidence("provider_unavailable", query=query, attempted_external_call=False)
+                ],
             )
 
         sanitized_context = _sanitized_context(tool_input.arguments)
         try:
             provider_result = self.provider(query, sanitized_context)
-        except Exception as exc:
-            return _output(started, ok=False, error=str(exc))
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            return _output(
+                started,
+                ok=False,
+                error=f"provider_error: {exc}",
+                evidence=[_status_evidence("provider_error", query=query, attempted_external_call=True)],
+            )
         lean_result = _lean_provider_result(query=query, provider_result=provider_result)
+        result_count = int(lean_result.get("result_count") or 0)
 
         return _output(
             started,
             ok=True,
-            artifacts=[{"type": "web_search_result", "format": "json", "content": json_safe(lean_result)}],
+            evidence=[
+                _status_evidence(
+                    "success",
+                    query=query,
+                    attempted_external_call=True,
+                    result_count=result_count,
+                )
+            ],
+            artifacts=[
+                {
+                    "type": "web_search_result",
+                    "format": "json",
+                    "content": json_safe({"tool_status": "success", **lean_result}),
+                }
+            ],
             sources=_extract_sources(lean_result),
         )
 
@@ -140,14 +182,33 @@ def _clean_text(value: Any, limit: int) -> str:
 def _max_results() -> int:
     try:
         return max(1, min(int(os.getenv("GATEWAY_WEB_SEARCH_MAX_RESULTS", "8") or "8"), 20))
-    except Exception:
+    except (TypeError, ValueError):
         return 8
+
+
+def _status_evidence(
+    tool_status: str,
+    *,
+    query: str,
+    attempted_external_call: bool,
+    result_count: int = 0,
+    reason: str = "",
+) -> Dict[str, Any]:
+    return {
+        "kind": "web_search_status",
+        "tool_status": tool_status,
+        "query": query,
+        "attempted_external_call": attempted_external_call,
+        "result_count": result_count,
+        "reason": reason,
+    }
 
 
 def _output(
     started: float,
     *,
     ok: bool,
+    evidence: Optional[List[Dict[str, Any]]] = None,
     artifacts: Optional[List[Dict[str, Any]]] = None,
     sources: Optional[List[Dict[str, Any]]] = None,
     warnings: Optional[List[str]] = None,
@@ -155,6 +216,7 @@ def _output(
 ) -> AgentToolOutput:
     return AgentToolOutput(
         ok=ok,
+        evidence=evidence or [],
         artifacts=artifacts or [],
         sources=sources or [],
         warnings=warnings or [],

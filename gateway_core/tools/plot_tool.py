@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifact_store import artifact_download_url, safe_artifact_path
+from .sql_input_guard import contains_sql_like_input
 from .tool_core import AgentTool, AgentToolInput, AgentToolOutput, ToolExecutionContext, json_safe
 
 
@@ -23,7 +24,7 @@ class PlotTool(AgentTool):
     def run(self, tool_input: AgentToolInput, context: ToolExecutionContext) -> AgentToolOutput:
         started = time.perf_counter()
         args = tool_input.arguments
-        if args.get("sql") or args.get("sql_query") or args.get("query_sql"):
+        if contains_sql_like_input(args):
             return _output(
                 started,
                 ok=False,
@@ -66,7 +67,7 @@ class PlotTool(AgentTool):
                 ok=False,
                 error="matplotlib is not installed; install requirements or use chart tool for SVG/HTML charts.",
             )
-        except Exception as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             return _output(started, ok=False, error=f"plot render failed: {exc}")
 
         json_path = png_path.with_suffix(".json")
@@ -191,14 +192,14 @@ def _is_number(value: Any) -> bool:
     try:
         float(value)
         return value is not None and value != ""
-    except Exception:
+    except (TypeError, ValueError):
         return False
 
 
 def _to_float(value: Any) -> float:
     try:
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return 0.0
 
 

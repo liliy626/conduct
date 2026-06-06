@@ -10,6 +10,10 @@ services:
       - MODEL_CONFIG_PATH=/app/model_config.yaml
       - POSTGRES_DSN=postgresql://${SERVER_POSTGRES_USER:-yili_user}:${SERVER_POSTGRES_PASSWORD:-change_me}@${POSTGRES_HOST:-yili-db}:5432/${SERVER_POSTGRES_DB:-yili}
       - MEILANHU_POSTGRES_SCHEMA=${MEILANHU_POSTGRES_SCHEMA:-public}
+      - PHOENIX_ENABLED=${PHOENIX_ENABLED:-0}
+      - PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT:-http://conduct-phoenix:6006/v1/traces}
+      - PHOENIX_PROJECT_NAME=${PHOENIX_PROJECT_NAME:-conduct-gateway}
+      - PHOENIX_EXPORT_TIMEOUT_SEC=${PHOENIX_EXPORT_TIMEOUT_SEC:-5}
     ports:
       - "${GATEWAY_PORT:-8008}:8008"
     extra_hosts:
@@ -23,6 +27,7 @@ services:
 
 networks:
   yili_net:
+    name: conduct_yili_net
     driver: bridge
   baota_net:
     external: true

@@ -137,12 +137,9 @@ def finish_trace(trace: SchoolTrace | None) -> None:
     while len(_TRACE_STORE) > limit:
         _TRACE_STORE.popitem(last=False)
     _append_trace_log(trace)
-    try:
-        from gateway_core.observability.langfuse_exporter import export_school_trace_to_langfuse
+    from gateway_core.observability.trace_exporters import export_school_trace_to_observability
 
-        export_school_trace_to_langfuse(trace)
-    except Exception:
-        pass
+    export_school_trace_to_observability(trace)
 
 
 def get_trace(trace_id: str, school_id: str | None = None, tenant_id: str | None = None) -> dict[str, Any] | None:

@@ -266,10 +266,7 @@ def final_answer_handoff_tool(
 ) -> StructuredTool:
     def _run(handoff_json: str) -> str:
         if tool_contract is not None:
-            try:
-                block_payload = tool_contract.handoff_block_payload()
-            except Exception:
-                block_payload = None
+            block_payload = tool_contract.handoff_block_payload()
             if block_payload:
                 return "FINAL_ANSWER_HANDOFF_BLOCKED: " + json.dumps(block_payload, ensure_ascii=False, default=str)
         handoff_payload = _loads_json_object(str(handoff_json or "")) or {"summary": str(handoff_json or "").strip()}
@@ -277,10 +274,7 @@ def final_answer_handoff_tool(
         handoff_payload.setdefault("question", question)
         handoff_payload.setdefault("source_views", source_views_fn())
         if tool_contract is not None:
-            try:
-                handoff_payload.setdefault("tool_contract", tool_contract.trace_payload())
-            except Exception:
-                pass
+            handoff_payload.setdefault("tool_contract", tool_contract.trace_payload())
         return "FINAL_ANSWER_HANDOFF_JSON: " + json.dumps(handoff_payload, ensure_ascii=False, default=str)
 
     return StructuredTool.from_function(
@@ -291,11 +285,8 @@ def final_answer_handoff_tool(
 
 
 def fallback_final_handoff_payload(*, question: str, tools: Any, caveat: str = "") -> dict[str, Any]:
-    evidence_board: dict[str, Any] = {}
-    try:
-        evidence_board = tools.evidence_board_payload()
-    except Exception:
-        evidence_board = {}
+    evidence_board_payload = getattr(tools, "evidence_board_payload", None)
+    evidence_board = evidence_board_payload() if callable(evidence_board_payload) else {}
     source_views = list(getattr(tools, "source_views", []) or [])
     evidence_by_task = getattr(tools, "evidence_by_task", {}) or {}
     payload = {
@@ -322,10 +313,8 @@ def _inter_agent_state_payload(*, question: str, tools: Any, handoff_payload: di
         evidence_by_task = {}
     evidence_board = handoff_payload.get("evidence_board")
     if not isinstance(evidence_board, dict):
-        try:
-            evidence_board = tools.evidence_board_payload()
-        except Exception:
-            evidence_board = {}
+        evidence_board_payload = getattr(tools, "evidence_board_payload", None)
+        evidence_board = evidence_board_payload() if callable(evidence_board_payload) else {}
     tool_contract = handoff_payload.get("tool_contract")
     if not isinstance(tool_contract, dict):
         tool_contract = {}
@@ -650,7 +639,7 @@ def _compact_json_value(value: Any, *, max_chars: int) -> Any:
 def _final_answer_evidence_digest_limit() -> int:
     try:
         return max(3, min(int(_env_value("SCHOOL_FINAL_ANSWER_EVIDENCE_DIGEST_LIMIT", default="24") or "24"), 80))
-    except Exception:
+    except ValueError:
         return 24
 
 

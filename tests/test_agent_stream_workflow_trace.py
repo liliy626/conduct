@@ -26,12 +26,18 @@ def test_inter_agent_state_build_trace_records_ref_sample_lineage() -> None:
     tools = SimpleNamespace(
         trace=trace,
         source_views=["zx_mlh.教师销假_请假明细"],
-        evidence_by_task={
-            "ddl_sql_query_1": {
-                "row_count": 1,
-                "raw_rows": [{"teacher_name": "王老师", "leave_type": "病假"}],
-                "evidence_summary": {
+            evidence_by_task={
+                "ddl_sql_query_1": {
+                    "task_id": "ddl_sql_query_1",
+                    "allowed": True,
+                    "intent": "raw_sql_select",
+                    "dataset_label": "教师销假_请假明细",
+                    "row_count": 1,
+                    "raw_sql_handle": "trace://current/task/ddl_sql_query_1/raw_rows",
                     "row_sample": [{"teacher_name": "王老师", "leave_type": "病假"}],
+                    "raw_rows": [{"teacher_name": "王老师", "leave_type": "病假"}],
+                    "evidence_summary": {
+                        "row_sample": [{"teacher_name": "王老师", "leave_type": "病假"}],
                 },
                 "sql_lineage": {
                     "sql": "select teacher_name, leave_type from zx_mlh.教师销假_请假明细",
@@ -54,7 +60,7 @@ def test_inter_agent_state_build_trace_records_ref_sample_lineage() -> None:
     assert build_step.name == "inter_agent_state.build"
     assert build_step.output["workflow_step"]["step_id"] == "evidence.normalize_inter_agent_state"
     task = build_step.output["data_evidence_tasks"]["ddl_sql_query_1"]
-    assert task["ref"]["id"].startswith("task:ddl_sql_query_1")
+    assert task["ref"]["id"].startswith("trace://current/task/ddl_sql_query_1")
     assert task["sample_count"] == 1
     assert "sql" in task["lineage_keys"]
     assert "raw_rows" not in payload["inter_agent_state"]["data_evidence"]["ddl_sql_query_1"]

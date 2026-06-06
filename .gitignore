@@ -32,6 +32,7 @@ data/openwebui_question_route_monitor.jsonl
 data/gateway_runtime.log
 artifacts/gateway/**
 presenton_data/**
+ops/phoenix/local-data/**
 analysis/**
 !analysis/README.md
 !analysis/failure_labels/README.md

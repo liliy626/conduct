@@ -14,6 +14,7 @@ from langchain_core.tools import StructuredTool
 
 from gateway_core.agents.school_sql.analysis_tools import analyze_trend, compare_cohort, detect_anomalies
 from gateway_core.agents.school_sql.canonicalizer import normalize_sql_to_canonical
+from gateway_core.agents.school_sql import jsonb_authorization as _jsonb_auth, table_authorization as _table_auth
 from gateway_core.schema_context.ddl_retriever import RetrievedDDLContext, retrieve_lean_ddl_context
 from gateway_core.schema_context.query_experience import (
     EXPERIENCE_CACHE as _EXPERIENCE_CACHE,
@@ -39,6 +40,7 @@ from gateway_core.agents.school_sql.query_result_summarizer import (
     summarize_query_result,
 )
 from gateway_core.agents.school_sql.sql_guardrail import validate_raw_sql
+from gateway_core.agents.school_sql import tool_contract_events as _tool_contract_events
 from gateway_core.agents.school_sql.sql_utils import (
     coerce_tool_text as _coerce_tool_text,
     ddl_max_chars_per_doc as _ddl_max_chars_per_doc,
@@ -125,31 +127,24 @@ class DDLReactTools:
             StructuredTool.from_function(
                 name="list_available_tables",
                 description=(
-                    "按关键词列出当前学校 schema 下可能相关的物理表/视图。"
-                    "当 ddl_search 没找到合适业务表，或需要扩大搜索范围时调用。"
-                    "输入是自然语言关键词，例如：教师请假、报修、德育扣分。"
+                    "按关键词列出当前学校 schema 候选表；只发现表，不扩大 SQL 白名单。"
                 ),
                 func=self.list_available_tables,
             ),
             StructuredTool.from_function(
                 name="inspect_table_schema",
                 description=(
-                    "查看当前学校 schema 下某张表的字段、类型和 DDL 摘要，并把该表加入本轮 SQL 白名单。"
-                    "当 ddl_search 返回的 evidence packet 显示 sql_ready=true 且 sql_ready_risk=low，"
-                    "并且问题可由单表明确字段回答时，优先直接 sql_db_query；只有字段含义、JSONB/数组展开、"
-                    "关联关系或时间口径不明确时再调用本工具。"
-                    "若准备使用的字段没有出现在 ddl_search evidence 或已 inspect 的字段清单中，必须先调用本工具确认。"
-                    "输入表名，可以是 表名 或 schema.表名。"
+                    "查看已由 ddl_search 返回的表字段、类型和 DDL 摘要；只补证据，不扩大 SQL 白名单。"
+                    "仅字段含义、JSONB/数组展开、关联关系或时间口径不明确时调用。"
+                    "输入表名，可以是 表名 或 schema.表名；字段证据不足时先 inspect 再 SQL。"
                 ),
                 func=self.inspect_table_schema,
             ),
             StructuredTool.from_function(
                 name="sample_table_rows",
                 description=(
-                    "抽样查看当前学校 schema 下某张表的真实数据行。"
-                    "ddl_search 的 latest_row_preview 已足够且 sql_ready_risk=low 时通常不需要调用；"
-                    "遇到 JSON/数组字段、字段含义不确定、聚合前需要确认数据结构时调用。"
-                    "参数 table_name 是表名，limit 默认 5。"
+                    "抽样查看已由 ddl_search 返回的表；只补数据形态证据，不扩大 SQL 白名单。"
+                    "遇到 JSON/数组字段、字段含义不确定或聚合前确认结构时调用。"
                 ),
                 func=self.sample_table_rows,
             ),
@@ -157,8 +152,7 @@ class DDLReactTools:
                 name="inspect_jsonb_recordset",
                 description=(
                     "探测当前学校 schema 下某张表的 JSONB/JSON 数组子表字段，返回内部 key、样例和 record_schema 建议。"
-                    "当 DDL 中出现 JSONB 子表虚拟列，或用户要按子表里的星期、负责人、内容、项目、地点过滤时，先调用此工具。"
-                    "输入 JSON：table_name、jsonb_column、limit。"
+                    "查询子表内容前先调用；输入 JSON：table_name、jsonb_column、limit。"
                 ),
                 func=self.inspect_jsonb_recordset,
             ),
@@ -178,11 +172,7 @@ class DDLReactTools:
                     "按业务问题或线索从当前学校 schema 的 ddl_vector_documents 检索相关表结构。"
                     "返回 candidate_evidence_packets：包含 freshness_status、recommended_time_field、latest_row_preview、"
                     "sql_ready、sql_ready_risk 和 fallback 建议。写 SQL 前必须先调用。"
-                    "如果候选表 sql_ready=true、sql_ready_risk=low，且用户问题可由明确单表字段回答，"
-                    "优先直接用 recommended_time_field 生成 SQL 并调用 sql_db_query；"
-                    "生成 SQL 时必须严格使用该表 evidence/DDL 中出现过的字段名，不能把其他表字段迁移过来；"
-                    "只有字段含义、JSONB/数组展开、多表关联或时间口径不明确时再 inspect/sample。"
-                    "输入是自然语言检索词。"
+                    "SQL 字段必须来自该表 evidence/DDL；字段、JSONB、关联或时间不明时再 inspect/sample。"
                 ),
                 func=self.ddl_search,
             ),
@@ -195,42 +185,28 @@ class DDLReactTools:
                 name="sql_db_query",
                 description=(
                     "执行一条 PostgreSQL SELECT。输入是 SQL 字符串。"
-                    "只能查询 ddl_search 本轮返回过的当前学校 schema 表；禁止写操作、多语句、系统 schema 和裸表名。"
-                    "SQL 引用的字段必须来自 ddl_search evidence/DDL 或 inspect_table_schema 返回的该表字段清单；"
-                    "字段没有证据时先 inspect_table_schema 修正。"
+                    "只查 ddl_search 本轮返回过的表；字段必须来自 DDL/evidence 或 inspect 字段清单。"
                 ),
                 func=self.sql_db_query,
             ),
             StructuredTool.from_function(
                 name="suggest_related_queries",
-                description=(
-                    "基于 EvidenceBoard 已查到的数据线索，建议下一步业务补证方向。"
-                    "输入可为空或当前想分析的线索。返回建议检索词，不直接查库。"
-                ),
+                description="基于 EvidenceBoard 已查到的数据线索建议下一步补证方向；不直接查库。",
                 func=self.suggest_related_queries,
             ),
             StructuredTool.from_function(
                 name="trend_analysis",
-                description=(
-                    "对已查询到的 evidence rows 或输入 rows 做趋势分析。"
-                    "适合月份、周、日期、学期等时间序列。可传 JSON：rows、time_field、metric_field。"
-                ),
+                description="对已查询到的 evidence rows 做趋势分析；输入 time_field、metric_field。",
                 func=self.trend_analysis,
             ),
             StructuredTool.from_function(
                 name="anomaly_detection",
-                description=(
-                    "对已查询到的聚合结果或输入 rows 识别异常值和重点关注点。"
-                    "可传 JSON：rows、metric_field、label_field。"
-                ),
+                description="对已查询到的 evidence rows 识别异常；输入 metric_field、label_field。",
                 func=self.anomaly_detection,
             ),
             StructuredTool.from_function(
                 name="cohort_compare",
-                description=(
-                    "对同类群体结果做排名、分位数和目标对象对比。"
-                    "可传 JSON：rows、target_name、name_field、metric_field。"
-                ),
+                description="对已查询到的 evidence rows 做群组对比；输入 name/metric 字段。",
                 func=self.cohort_compare,
             ),
         ]
@@ -257,7 +233,7 @@ class DDLReactTools:
                     "table_count": len(tables),
                     "tables": tables,
                 }
-            except Exception as exc:
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 payload = {
                     "source": "information_schema",
                     "schema_name": self.package_index.source_schema,
@@ -281,6 +257,11 @@ class DDLReactTools:
                 payload = {"source": "information_schema", "allowed": False, "error": "invalid_table_name"}
                 set_step_output(step, payload)
                 return json.dumps(payload, ensure_ascii=False, default=str)
+            ref = f"{table_ref[0]}.{table_ref[1]}"
+            if not _table_auth.table_ref_in_allowlist(ref, self.allowed_table_refs, schema_name=self.package_index.source_schema):
+                payload = _table_auth.table_ref_not_authorized_payload(source="information_schema", error="ddl_search_required_before_inspect_table_schema", table_ref=ref)
+                set_step_output(step, payload)
+                return json.dumps(payload, ensure_ascii=False, default=str)
             self._post_ddl_inspect_refs.add(_normalize_ref(f"{table_ref[0]}.{table_ref[1]}"))
             try:
                 columns = _inspect_table_columns(
@@ -302,12 +283,11 @@ class DDLReactTools:
                         "source": "information_schema",
                         "allowed": False,
                         "error": "table_not_found_or_no_columns",
-                        "table_ref": f"{table_ref[0]}.{table_ref[1]}",
+                        "table_ref": ref,
                     }
                 else:
-                    self._remember_table_ref(f"{table_ref[0]}.{table_ref[1]}")
                     self._remember_known_columns(
-                        f"{table_ref[0]}.{table_ref[1]}",
+                        ref,
                         [str(column.get("column_name") or "") for column in columns],
                     )
                     payload = {
@@ -315,17 +295,17 @@ class DDLReactTools:
                         "allowed": True,
                         "schema_name": table_ref[0],
                         "table_name": table_ref[1],
-                        "table_ref": f"{table_ref[0]}.{table_ref[1]}",
+                        "table_ref": ref,
                         "column_count": len(columns),
                         "columns": columns,
                         "ddl_summary": ddl_summary,
                     }
-            except Exception as exc:
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 payload = {
                     "source": "information_schema",
                     "allowed": False,
                     "error": str(exc),
-                    "table_ref": f"{table_ref[0]}.{table_ref[1]}",
+                    "table_ref": ref,
                 }
             set_step_output(
                 step,
@@ -354,8 +334,12 @@ class DDLReactTools:
                 payload = {"source": "school_schema", "allowed": False, "error": "invalid_table_name"}
                 set_step_output(step, payload)
                 return json.dumps(payload, ensure_ascii=False, default=str)
-            self._post_ddl_sample_refs.add(_normalize_ref(f"{table_ref[0]}.{table_ref[1]}"))
-            self._remember_table_ref(f"{table_ref[0]}.{table_ref[1]}")
+            ref = f"{table_ref[0]}.{table_ref[1]}"
+            if not _table_auth.table_ref_in_allowlist(ref, self.allowed_table_refs, schema_name=self.package_index.source_schema):
+                payload = _table_auth.table_ref_not_authorized_payload(source="school_schema", error="ddl_search_required_before_sample_table_rows", table_ref=ref)
+                set_step_output(step, payload)
+                return json.dumps(payload, ensure_ascii=False, default=str)
+            self._post_ddl_sample_refs.add(_normalize_ref(ref))
             sample_columns = _sample_select_columns(
                 psycopg_module=self.psycopg_module,
                 dsn=self.dsn,
@@ -387,7 +371,7 @@ class DDLReactTools:
                     sql=guardrail.sql,
                     params=[],
                 )
-            except Exception as exc:
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 payload = {
                     "source": "school_schema",
                     "allowed": False,
@@ -476,6 +460,9 @@ class DDLReactTools:
                         "并用 where 过滤 s. 子表字段，例如 s.\"星期\" = '星期三'。"
                     ),
                 }
+                _jsonb_auth.remember_recordset_inspection(
+                    self, f"{table_ref[0]}.{table_ref[1]}", jsonb_column, suggestion
+                )
                 self._mark_json_sampled([f"{table_ref[0]}.{table_ref[1]}"])
             except Exception as exc:
                 payload = {
@@ -521,6 +508,12 @@ class DDLReactTools:
             if base_error:
                 set_step_output(step, base_error)
                 return json.dumps(base_error, ensure_ascii=False, default=str)
+            assert table_ref is not None
+            ref = f"{table_ref[0]}.{table_ref[1]}"
+            payload = _jsonb_auth.recordset_inspection_payload(self, ref, jsonb_column, record_schema)
+            if payload:
+                set_step_output(step, payload)
+                return json.dumps(payload, ensure_ascii=False, default=str)
             schema_error = _record_schema_error(record_schema)
             if schema_error:
                 payload = {"source": "school_schema", "allowed": False, "error": schema_error}
@@ -531,7 +524,6 @@ class DDLReactTools:
                 payload = {"source": "school_schema", "allowed": False, "error": where_error}
                 set_step_output(step, payload)
                 return json.dumps(payload, ensure_ascii=False, default=str)
-            assert table_ref is not None
             main_fields = _safe_main_fields(select_main_fields)
             select_parts = [f"m.{_quote_ident(field)} AS {_quote_ident(field)}" for field in main_fields]
             select_parts.extend(f"s.{_quote_ident(field)} AS {_quote_ident(field)}" for field in record_schema)
@@ -570,7 +562,7 @@ class DDLReactTools:
                     sql=guardrail.sql,
                     params=[],
                 )
-            except Exception as exc:
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 payload = {
                     "source": "school_schema",
                     "allowed": False,
@@ -590,7 +582,9 @@ class DDLReactTools:
                 referenced_views=[f"{table_ref[0]}.{table_ref[1]}"],
             )
             selected = self._selected_dataset_payloads(guardrail.referenced_views)
+            raw_sql_handle = _raw_rows_handle(self.trace, task_id)
             payload = {
+                "task_id": task_id,
                 "source": "school_schema",
                 "sub_question": self.question,
                 "purpose": "JSONB 子表字段经 jsonb_to_recordset 打平成虚拟子表后取得的证据。",
@@ -609,11 +603,18 @@ class DDLReactTools:
                 "evidence_summary": evidence_summary,
                 "row_sample": evidence_summary.get("row_sample", []),
                 "referenced_views": guardrail.referenced_views,
+                "sql_lineage": {
+                    "sql": guardrail.sql,
+                    "tables_used": guardrail.referenced_views,
+                    "row_count": len(rows),
+                    "raw_sql_handle": raw_sql_handle,
+                },
                 "limit_applied": guardrail.limit_applied,
-                "raw_sql_handle": _raw_rows_handle(self.trace, task_id),
+                "raw_sql_handle": raw_sql_handle,
             }
             payload.update(display_rows_for_shape(evidence_shape="display", formatted_rows=formatted_rows))
             self.evidence_by_task[task_id] = payload
+            _tool_contract_events.record_tool_result(self, "jsonb_recordset_query", payload)
             for item in selected:
                 self.selected_datasets_by_id[item["dataset_id"]] = item
                 view = str(item.get("source_view") or "").strip()
@@ -1103,6 +1104,7 @@ class DDLReactTools:
             if _is_json_or_array_sample_query(guardrail.sql) or _is_limited_non_aggregate_query(guardrail.sql):
                 self._mark_json_sampled(guardrail.referenced_views)
             payload = {
+                "task_id": task_id,
                 "source": "school_schema",
                 "sub_question": self.question,
                 "purpose": "DDL ReAct Agent 基于 DDL 检索和业务推理自主生成 SQL 后取得的证据。",
@@ -1143,6 +1145,7 @@ class DDLReactTools:
             display_payload.update(entity_stats)
             payload.update(display_payload)
             self.evidence_by_task[task_id] = payload
+            _tool_contract_events.record_tool_result(self, "sql_db_query", payload)
             for item in selected:
                 self.selected_datasets_by_id[item["dataset_id"]] = item
                 view = str(item.get("source_view") or "").strip()
@@ -1372,10 +1375,7 @@ class DDLReactTools:
         return {"input": text}
 
     def _analysis_rows(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        for key in ("rows", "data", "items", "row_sample"):
-            rows = payload.get(key)
-            if isinstance(rows, list):
-                return [dict(item) for item in rows if isinstance(item, dict)]
+        del payload
         gathered: list[dict[str, Any]] = []
         for task in self.evidence_by_task.values():
             if not isinstance(task, dict):

@@ -6,61 +6,12 @@ from html import escape
 from typing import Any, Dict, Iterable, List, Optional
 
 from .artifact_store import artifact_download_url, safe_artifact_path
+from .chart_field_hints import LABEL_FIELD_HINTS, VALUE_FIELD_HINTS
+from .sql_input_guard import contains_sql_like_input
 from .tool_core import AgentTool, AgentToolInput, AgentToolOutput, ToolExecutionContext, json_safe
 
 
 SUPPORTED_CHART_TYPES = {"line", "bar", "stacked_bar", "pie", "table"}
-LABEL_FIELD_HINTS = (
-    "月份",
-    "日期",
-    "时间",
-    "学期",
-    "学年",
-    "学科",
-    "年级",
-    "班级",
-    "类别",
-    "类型",
-    "原因",
-    "项目",
-    "名称",
-    "姓名",
-    "month",
-    "date",
-    "time",
-    "subject",
-    "grade",
-    "class",
-    "category",
-    "type",
-    "reason",
-    "name",
-    "label",
-)
-VALUE_FIELD_HINTS = (
-    "次数",
-    "人次",
-    "人数",
-    "条数",
-    "数量",
-    "总数",
-    "合计",
-    "总量",
-    "总天数",
-    "小时",
-    "积分",
-    "扣分",
-    "分数",
-    "占比",
-    "count",
-    "total",
-    "sum",
-    "value",
-    "hours",
-    "days",
-    "score",
-    "rate",
-)
 
 
 class ChartTool(AgentTool):
@@ -70,6 +21,13 @@ class ChartTool(AgentTool):
     def run(self, tool_input: AgentToolInput, context: ToolExecutionContext) -> AgentToolOutput:
         started = time.perf_counter()
         args = tool_input.arguments
+        if contains_sql_like_input(args):
+            return _output(
+                started,
+                ok=False,
+                error="chart tool does not execute SQL; call sql_db_query first and pass evidence_rows/rows.",
+            )
+
         rows = _evidence_rows(tool_input)
         if not rows:
             return _output(
@@ -91,6 +49,16 @@ class ChartTool(AgentTool):
         x_field = str(args.get("x") or args.get("x_field") or "")
         y_field = str(args.get("y") or args.get("y_field") or _first_item(args.get("y_fields")) or "")
         series_field = str(args.get("series") or "")
+        if chart_type != "table" and not _resolvable_value_field(
+            rows,
+            y_field=y_field,
+            exclude={field for field in (x_field, series_field) if field},
+        ):
+            return _output(
+                started,
+                ok=False,
+                error="chart tool requires an inferable numeric value field for non-table charts.",
+            )
         chart_json = _build_chart_json(
             rows=rows,
             chart_type=chart_type,
@@ -233,6 +201,13 @@ def _valid_field(rows: List[Dict[str, Any]], field: str) -> str:
     if not field:
         return ""
     return field if any(field in row for row in rows) else ""
+
+
+def _resolvable_value_field(rows: List[Dict[str, Any]], *, y_field: str, exclude: set[str]) -> str:
+    valid_y = _valid_field(rows, y_field)
+    if valid_y and any(_number_or_none(row.get(valid_y)) is not None for row in rows):
+        return valid_y
+    return _infer_value_field(rows, exclude=exclude)
 
 
 def _infer_label_field(rows: List[Dict[str, Any]]) -> str:
@@ -514,7 +489,7 @@ def _number_or_none(value: Any) -> Optional[float]:
         if text.endswith("%"):
             return float(text[:-1])
         return float(text)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 

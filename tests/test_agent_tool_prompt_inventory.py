@@ -21,6 +21,7 @@ INVENTORY_PATH = REPO_ROOT / "docs" / "agent_tool_prompt_inventory.md"
 AGENT_CARDS_PATH = REPO_ROOT / "docs" / "agent_responsibility_cards.md"
 TOOL_CARDS_PATH = REPO_ROOT / "docs" / "tool_responsibility_cards.md"
 PROMPT_CARDS_PATH = REPO_ROOT / "docs" / "prompt_responsibility_cards.md"
+MAS_ASSETS_PATH = REPO_ROOT / "docs" / "multi_agent_iteration_assets.md"
 SQL_TOOLS_PATH = REPO_ROOT / "gateway_core" / "agents" / "school_sql" / "sql_tools.py"
 
 
@@ -38,6 +39,10 @@ def _tool_cards_text() -> str:
 
 def _prompt_cards_text() -> str:
     return PROMPT_CARDS_PATH.read_text(encoding="utf-8")
+
+
+def _mas_assets_text() -> str:
+    return MAS_ASSETS_PATH.read_text(encoding="utf-8")
 
 
 def test_inventory_lists_registered_agent_skills() -> None:
@@ -59,7 +64,7 @@ def test_agent_cards_list_registered_agent_contracts() -> None:
         assert spec.skill_cls.__module__ in text
         assert spec.skill_cls.__name__ in text
         assert f"`{spec.default_model_role}`" in text
-        assert "yes" in text if spec.supports_stream else "no" in text
+        assert "支持流式" in text
         for output in spec.outputs:
             assert f"`{output}`" in text
         for tool_name in spec.tools:
@@ -112,7 +117,74 @@ def test_tool_cards_list_internal_business_prompt_context_tool() -> None:
 
     assert "`business_prompt_context`" in text
     assert "`gateway_core.tools.business_prompt_tool.BusinessPromptContextTool`" in text
-    assert "internal context helper" in text
+    assert "内部 context helper" in text
+
+
+def test_tool_cards_document_web_search_status_contract() -> None:
+    text = _tool_cards_text()
+
+    for status in (
+        "invalid_input",
+        "privacy_blocked",
+        "disabled",
+        "provider_unavailable",
+        "provider_error",
+    ):
+        assert f"`{status}`" in text
+
+
+def test_tool_cards_document_school_sql_allowlist_owner() -> None:
+    text = _tool_cards_text()
+
+    assert "只有 `ddl_search` 能扩大 SQL 白名单" in text
+    assert "扩大 SQL 白名单" in text
+    assert "record_schema 不匹配" in text
+    assert "接受输入 rows 伪造证据" in text
+
+
+def test_inventory_links_multi_agent_iteration_assets() -> None:
+    text = _inventory_text()
+
+    assert "docs/multi_agent_iteration_assets.md" in text
+    assert "`RawDataEvidencePayload`" in text
+    assert "`validate_data_evidence_payload()`" in text
+    for field in (
+        "task_id",
+        "allowed",
+        "intent",
+        "dataset_label",
+        "row_count",
+        "sql_lineage",
+        "evidence_summary",
+        "raw_sql_handle",
+        "original_count",
+        "included_count",
+        "truncated",
+    ):
+        assert f"`{field}`" in text
+
+
+def test_multi_agent_iteration_assets_document_core_asset_packages() -> None:
+    text = _mas_assets_text()
+
+    for heading in (
+        "## 1. 图拓扑与状态机转移矩阵",
+        "## 2. 规划契约与多模态产物注册表",
+        "## 3. 工具血缘与数据沙箱白名单",
+        "## 4. 高维证据与柔性角色提示词资产库",
+        "## 5. 流式分流策略与响应合成协议",
+        "## 6. 回归单测与性能对账测试账本",
+    ):
+        assert heading in text
+    for source in (
+        "gateway_core/agents/contracts/workflow_contracts.py",
+        "gateway_core/agents/contracts/inter_agent_state.py",
+        "gateway_core/agents/school_sql/sql_tools.py",
+        "gateway_core/agents/school_sql/final_handoff.py",
+        "tests/test_tool_contract.py",
+        "tests/test_output_contracts.py",
+    ):
+        assert f"`{source}`" in text
 
 
 def test_inventory_lists_workflow_steps() -> None:

@@ -1,30 +1,33 @@
-# Agent / Tool / Prompt Inventory
+# Agent / Tool / Prompt 总览
 
-This document is the repo-level map for agent responsibilities, tool surfaces,
-prompt ownership, and runtime contracts. Keep it updated whenever a new agent,
-tool, prompt module, or handoff contract is added.
+这份文档是仓库级系统地图，用来说明各个 agent 的职责、tool 的边界、
+prompt 的归属，以及运行时 contract 的主线。以后新增 agent、tool、
+prompt 模块或 handoff contract 时，都要同步更新这里。
 
-## Authoritative Sources
+## 权威来源
 
-| Area | Source of truth | Purpose |
+| 范围 | 权威文件 | 用途 |
 | --- | --- | --- |
-| Agent registry | `gateway_core/agents/universal_hub/registry.py` | Declares skill names, output ownership, default tools, and stream support. |
-| Workflow contract | `gateway_core/agents/contracts/workflow_contracts.py` | Declares node order, executor ownership, reads/writes, tool policy, and trace policy. |
-| Output contract | `gateway_core/agents/contracts/output_contracts.py` | Declares cross-agent output names, tool outputs, handoff fields, and contract version. |
-| Prompt registry | `gateway_core/prompts/prompt_layer.py` plus `gateway_core/prompts/**` | Registers versioned prompt templates by prompt id. |
-| Gateway tool registry | `gateway_core/tools/core/registry.py` plus `gateway_core/tools/catalog/non_sql.py` | Registers non-SQL tools, aliases, risk, tags, and scopes. |
-| School SQL tools | `gateway_core/agents/school_sql/sql_tools.py` | Exposes the internal ReAct tools used by the School SQL executor. |
+| Agent 注册表 | `gateway_core/agents/universal_hub/registry.py` | 声明 skill 名称、输出归属、默认工具和流式能力。 |
+| Workflow contract | `gateway_core/agents/contracts/workflow_contracts.py` | 声明节点顺序、执行器归属、读写字段、工具策略和 trace 策略。 |
+| Output contract | `gateway_core/agents/contracts/output_contracts.py` | 声明跨 agent 输出名、tool 输出、handoff 字段和 contract 版本。 |
+| Prompt 注册表 | `gateway_core/prompts/prompt_layer.py` 与 `gateway_core/prompts/**` | 按 `prompt_id` 注册带版本的 prompt 模板。 |
+| Gateway tool 注册表 | `gateway_core/tools/core/registry.py` 与 `gateway_core/tools/catalog/non_sql.py` | 注册非 SQL 工具、别名、风险等级、标签和权限 scope。 |
+| School SQL 工具 | `gateway_core/agents/school_sql/sql_tools.py` | 暴露 School SQL executor 内部使用的 ReAct 工具。 |
 
-Per-agent operating details live in `docs/agent_responsibility_cards.md`.
-Per-tool operating details live in `docs/tool_responsibility_cards.md`.
-Per-prompt operating details live in `docs/prompt_responsibility_cards.md`.
+更细的分工文档：
 
-The current contract versions are:
+- 每个 agent 的运行边界：`docs/agent_responsibility_cards.md`
+- 每个 tool 的运行边界：`docs/tool_responsibility_cards.md`
+- 每个 prompt 的运行边界：`docs/prompt_responsibility_cards.md`
+- 多智能体长期迭代资产包：`docs/multi_agent_iteration_assets.md`
+
+当前 contract 版本：
 
 - `OUTPUT_CONTRACT_VERSION = "2026-06-03.1"`
 - `WORKFLOW_CONTRACT_VERSION = "2026-06-04.1"`
 
-## Runtime Route
+## 运行主链路
 
 ```text
 OpenAI-compatible request
@@ -37,206 +40,222 @@ OpenAI-compatible request
   -> OpenAI-compatible response
 ```
 
-For school data answers, the canonical workflow is
-`SCHOOL_DATA_ANSWER_WORKFLOW` with workflow id `school_data_answer`.
+学校数据问答的标准 workflow 是 `SCHOOL_DATA_ANSWER_WORKFLOW`，
+workflow id 是 `school_data_answer`。
 
-| Step | Executor | Responsibility | Reads | Writes |
+| Step | Executor | 职责 | 读取 | 写入 |
 | --- | --- | --- | --- | --- |
-| `route.resolve` | `gateway` | Resolve tenant, auth, and route. | request headers, messages | route, tenant |
-| `context.build_school` | `context_builder` | Select and compress school metadata context. | tenant, question | schema, SQL experience, business prompt context |
-| `contract.plan` | `contract_planner` | Plan per-turn route, tools, required outputs, and answer focus. | question, conversation, schema, DDL, business prompt context | tool contract, required outputs |
-| `school_sql.react_execute` | `school_sql_react` | Query school data evidence through DDL and read-only SQL tools. | question, tool contract, schema, conversation | data evidence, evidence board, source views |
-| `evidence.normalize_inter_agent_state` | `workflow` | Normalize SQL evidence into serializable `InterAgentState`. | data evidence, evidence board, source views, tool contract | inter-agent state |
-| `handoff.final_answer` | `workflow` | Build compact final-answer handoff from `InterAgentState`. | inter-agent state | handoff payload |
-| `answer.compose` | `final_answer` | Compose the final natural-language answer from verified evidence. | handoff payload, business prompt context | final answer |
+| `route.resolve` | `gateway` | 解析租户、鉴权和路由。 | request headers, messages | route, tenant |
+| `context.build_school` | `context_builder` | 选择并压缩学校元数据上下文。 | tenant, question | schema, SQL experience, business prompt context |
+| `contract.plan` | `contract_planner` | 规划本轮 route、tools、required outputs 和 answer focus。 | question, conversation, schema, DDL, business prompt context | tool contract, required outputs |
+| `school_sql.react_execute` | `school_sql_react` | 通过 DDL 和只读 SQL 工具查询学校数据证据。 | question, tool contract, schema, conversation | data evidence, evidence board, source views |
+| `evidence.normalize_inter_agent_state` | `workflow` | 把 SQL 证据标准化成可序列化的 `InterAgentState`。 | data evidence, evidence board, source views, tool contract | inter-agent state |
+| `handoff.final_answer` | `workflow` | 从 `InterAgentState` 构造紧凑的 final-answer handoff。 | inter-agent state | handoff payload |
+| `answer.compose` | `final_answer` | 基于已验证证据生成最终自然语言答案。 | handoff payload, business prompt context | final answer |
 
-## Agent Inventory
+## Agent 清单
 
-| Skill | Implementation | Owned outputs | Declared tools | Role | Boundary |
+| Skill | 实现 | 归属输出 | 声明工具 | 角色 | 边界 |
 | --- | --- | --- | --- | --- | --- |
-| `school_sql` | `gateway_core.agents.school_sql.school_sql_skill.SchoolSqlSkill` | `data_evidence` | `ddl_search`, `sql_db_query`, `sample_table_rows` | `data_agent` | Owns school database evidence. It must not own final prose, policy retrieval, or raw row dumping. |
-| `chat` | `gateway_core.agents.chat.chat_skill.ChatSkill` | none | none | `general_chat` | Owns general conversational fallback. It must not fabricate data evidence. |
-| `image_generator` | `gateway_core.agents.visual.image_generation_skill.ImageGenerationSkill` | `image_artifact` | `image_generation` | `visual_agent` | Owns image artifact generation. It must not answer school SQL questions. |
-| `ppt_generator` | `gateway_core.agents.ppt.ppt_generation_skill.PptGenerationSkill` | `ppt_artifact` | `ppt_generation` | `presentation_agent` | Owns presentation artifact generation. It must not own evidence retrieval. |
+| `school_sql` | `gateway_core.agents.school_sql.school_sql_skill.SchoolSqlSkill` | `data_evidence` | `ddl_search`, `sql_db_query`, `sample_table_rows` | `data_agent` | 负责学校数据库证据；不负责最终表述、政策检索或原始行无界倾倒。 |
+| `chat` | `gateway_core.agents.chat.chat_skill.ChatSkill` | 无 | 无 | `general_chat` | 负责普通对话兜底；不能伪造数据证据。 |
+| `image_generator` | `gateway_core.agents.visual.image_generation_skill.ImageGenerationSkill` | `image_artifact` | `image_generation` | `visual_agent` | 负责图片产物生成；不回答 School SQL 问题。 |
+| `ppt_generator` | `gateway_core.agents.ppt.ppt_generation_skill.PptGenerationSkill` | `ppt_artifact` | `ppt_generation` | `presentation_agent` | 负责 PPT 产物生成；不负责证据检索。 |
 
-`policy_only` is intentionally not an agent. Policy lookup is a tool capability
-(`policy.official_policy_search`) that can contribute `policy_evidence` to a
-turn contract.
+`policy_only` 已经不再是 agent。政策检索是 tool 能力
+（`policy.official_policy_search`），可在 turn contract 中贡献
+`policy_evidence`。
 
-## Tool Inventory
+## Tool 清单
 
 ### Gateway Tools
 
-These tools are registered through `GatewayToolRegistry` and are suitable for
-cross-agent planning.
+这些工具通过 `GatewayToolRegistry` 注册，适合被跨 agent 规划使用。
 
-| Canonical name | Aliases | Implementation | Output boundary |
+| Canonical name | Aliases | 实现 | 输出边界 |
 | --- | --- | --- | --- |
-| `time.resolve` | `time` | `gateway_core.tools.time_tool.TimeTool` | Resolves temporal expressions and current date context. |
-| `policy.official_policy_search` | `official_policy_search` | `gateway_core.tools.policy_tool.PolicyTool` | Returns official-policy evidence; medium risk; scope `policy:read`. |
-| `web.search` | `web_search` | `gateway_core.tools.web_search_tool.WebSearchTool` | Returns web evidence; high risk; scope `web:search`. |
-| `artifact.chart` | `chart` | `gateway_core.tools.chart_tool.ChartTool` | Produces `chart_artifact`. |
-| `artifact.plot` | `plot` | `gateway_core.tools.plot_tool.PlotTool` | Produces `plot_artifact`. |
-| `artifact.image_generate` | `generate_image_tool`, `image` | `gateway_core.tools.image_tool.GenerateImageTool` | Produces `image_artifact`. |
-| `artifact.slide_generate` | `slide` | `gateway_core.tools.slide_tool.SlideTool` | Produces `slide_artifact`. |
+| `time.resolve` | `time` | `gateway_core.tools.time_tool.TimeTool` | 解析时间表达和当前日期上下文。 |
+| `policy.official_policy_search` | `official_policy_search` | `gateway_core.tools.policy_tool.PolicyTool` | 返回官方政策证据；中风险；scope 为 `policy:read`。 |
+| `web.search` | `web_search` | `gateway_core.tools.web_search_tool.WebSearchTool` | 返回网页证据；高风险；scope 为 `web:search`。 |
+| `artifact.chart` | `chart` | `gateway_core.tools.chart_tool.ChartTool` | 产出 `chart_artifact`。 |
+| `artifact.plot` | `plot` | `gateway_core.tools.plot_tool.PlotTool` | 产出 `plot_artifact`。 |
+| `artifact.image_generate` | `generate_image_tool`, `image` | `gateway_core.tools.image_tool.GenerateImageTool` | 产出 `image_artifact`。 |
+| `artifact.slide_generate` | `slide` | `gateway_core.tools.slide_tool.SlideTool` | 产出 `slide_artifact`。 |
 
 ### School SQL ReAct Tools
 
-These are internal to the School SQL executor. They are intentionally closer to
-the database and should remain bounded by schema allowlists, DDL evidence, and
-read-only query rules.
+这些工具只属于 School SQL executor 内部。它们更靠近数据库层，因此必须受
+schema allowlist、DDL 证据和只读查询规则约束。
 
-| Tool | Responsibility |
+| Tool | 职责 |
 | --- | --- |
-| `ddl_search` | Mandatory first pass for candidate tables, business fields, time fields, latest-row preview, and SQL readiness. |
-| `list_available_tables` | Lists tables currently available to the School SQL executor. |
-| `inspect_table_schema` | Inspects columns and schema metadata for selected tables. |
-| `sample_table_rows` | Samples representative rows when schema alone is not enough. |
-| `inspect_jsonb_recordset` | Inspects JSONB recordset structure before JSONB expansion. |
-| `jsonb_recordset_query` | Executes bounded JSONB recordset queries. |
-| `sql_db_query` | Executes bounded read-only SQL against DDL-vetted tables. |
-| `sql_experience_search` | Retrieves prior SQL/query patterns relevant to the question. |
-| `suggest_related_queries` | Suggests follow-up query directions from gathered evidence. |
-| `trend_analysis` | Computes trend summaries from already gathered data. |
-| `anomaly_detection` | Detects anomalies from already gathered rows or evidence. |
-| `cohort_compare` | Compares cohorts from already gathered rows or evidence. |
+| `ddl_search` | SQL 前置第一步：查候选表、业务字段、时间字段、最新行预览和 SQL readiness。 |
+| `list_available_tables` | 列出当前 School SQL executor 可用表。 |
+| `inspect_table_schema` | 检查选中表的字段和 schema 元数据。 |
+| `sample_table_rows` | 当 schema 不足以判断时抽样代表性行。 |
+| `inspect_jsonb_recordset` | JSONB 展开前检查 recordset 结构。 |
+| `jsonb_recordset_query` | 执行受限的 JSONB recordset 查询。 |
+| `sql_db_query` | 对 DDL 验证过的表执行受限只读 SQL。 |
+| `sql_experience_search` | 检索与当前问题相关的历史 SQL/查询模式。 |
+| `suggest_related_queries` | 基于已有证据建议后续查询方向。 |
+| `trend_analysis` | 基于已收集数据计算趋势摘要。 |
+| `anomaly_detection` | 基于已收集行或证据检测异常。 |
+| `cohort_compare` | 基于已收集行或证据做群组对比。 |
 
-`BusinessPromptContextTool` is an internal context helper for School SQL
-contract construction. It should stay a context feeder, not a public evidence
-tool, unless it is deliberately promoted into the gateway tool registry.
+`BusinessPromptContextTool` 是 School SQL contract 构造时使用的内部上下文
+助手。除非明确提升到 gateway tool registry，否则它应保持为 context feeder，
+不是公共证据工具。
 
-## Prompt Inventory
+## Prompt 清单
 
 ### Prompt Layer
 
-The prompt layer primitives are:
+Prompt 层的基础对象：
 
-- `PromptTemplate`: versioned renderer with `prompt_id`, `version`, tags, and description.
-- `PromptRegistry`: single lookup and version registry.
-- `PromptBuilder`: composes registered prompt parts and inline literals.
-- `PromptRender`: records rendered text plus metadata and part lineage.
+- `PromptTemplate`：带 `prompt_id`、`version`、tags、description 的版本化 renderer。
+- `PromptRegistry`：统一 prompt 查找和版本注册。
+- `PromptBuilder`：组合已注册 prompt 片段和 inline literal。
+- `PromptRender`：记录渲染后的文本、元数据和 part lineage。
 
-New prompt behavior should be registered as a versioned `PromptTemplate` rather
-than hidden inside a long inline string.
+新的稳定 prompt 行为应该注册成带版本的 `PromptTemplate`，不要藏在很长的
+inline 字符串里。
 
 ### Agent Prompts
 
-| Prompt id | Module | Purpose |
+| Prompt id | 模块 | 用途 |
 | --- | --- | --- |
-| `agents.contract_planner.system` | `gateway_core.prompts.agents.contract_planner` | System rules for per-turn contract planning. |
-| `agents.contract_planner.user` | `gateway_core.prompts.agents.contract_planner` | User/context payload for contract planning. |
-| `agents.school_sql.system` | `gateway_core.prompts.agents.school_sql_agent` | System rules for School SQL evidence retrieval. |
-| `agents.final_answer.system` | `gateway_core.prompts.agents.final_answer` | System rules for final answer composition. |
-| `agents.final_answer.user` | `gateway_core.prompts.agents.final_answer` | Handoff/context payload for final answer composition. |
+| `agents.contract_planner.system` | `gateway_core.prompts.agents.contract_planner` | 单轮 contract planning 的 system 规则。 |
+| `agents.contract_planner.user` | `gateway_core.prompts.agents.contract_planner` | 单轮 contract planning 的 user/context payload。 |
+| `agents.school_sql.system` | `gateway_core.prompts.agents.school_sql_agent` | School SQL 证据检索的 system 规则。 |
+| `agents.final_answer.system` | `gateway_core.prompts.agents.final_answer` | 最终答案生成的 system 规则。 |
+| `agents.final_answer.user` | `gateway_core.prompts.agents.final_answer` | 最终答案生成的 handoff/context payload。 |
 
 ### Answer Rule Prompts
 
-| Prompt family | Prompt ids | Boundary |
+| Prompt family | Prompt ids | 边界 |
 | --- | --- | --- |
-| Context | `answers.context.global_base`, `answers.context.request_protocol`, `answers.context.question_type`, `answers.context.citation_format`, `answers.context.system_data`, `answers.context.teacher_development`, `answers.context.title_evaluation`, `answers.context.audience_reminder` | Request hierarchy, audience, citation, system/data context, teacher/title special cases. |
-| Evidence | `answers.evidence.board`, `answers.evidence.complex`, `answers.evidence.policy` | Evidence board, complex evidence, and policy evidence presentation rules. |
-| Style | `answers.style.json`, `answers.style.with_data`, `answers.style.no_data` | Output formatting for JSON, no-data, and data-backed answers. |
+| Context | `answers.context.global_base`, `answers.context.request_protocol`, `answers.context.question_type`, `answers.context.citation_format`, `answers.context.system_data`, `answers.context.teacher_development`, `answers.context.title_evaluation`, `answers.context.audience_reminder` | 请求层级、受众、引用、system/data context、教师发展和职称特殊规则。 |
+| Evidence | `answers.evidence.board`, `answers.evidence.complex`, `answers.evidence.policy` | Evidence Board、多证据和政策证据表达规则。 |
+| Style | `answers.style.json`, `answers.style.with_data`, `answers.style.no_data` | JSON、无数据、有数据上下文时的最终回答风格约束。 |
 
 ### Output Contract Prompts
 
-| File | Purpose |
+| 文件 | 用途 |
 | --- | --- |
-| `gateway_core/prompts/output_contracts/per_turn_contract_plan.py` | Prompt-facing description of the per-turn contract plan schema. |
-| `gateway_core/prompts/output_contracts/final_handoff.py` | Prompt-facing description of final-answer handoff fields. |
+| `gateway_core/prompts/output_contracts/per_turn_contract_plan.py` | 面向 prompt 的 per-turn contract plan schema 描述。 |
+| `gateway_core/prompts/output_contracts/final_handoff.py` | 面向 prompt 的 final-answer handoff 字段描述。 |
 
-Dynamic inline fragments are still acceptable for true runtime values such as
-the current user question, selected schema context, business prompt context,
-handoff JSON, and citation source JSON. Stable rules should move into versioned
-prompt modules.
+真正的运行时动态片段仍然可以 inline，例如当前用户问题、选中的 schema context、
+business prompt context、handoff JSON、citation sources JSON。稳定规则应迁移
+到带版本的 prompt 模块。
 
-## Contract Boundaries
+## Contract 边界
 
-- `ToolContract` tracks the planned route, allowed tools, required outputs,
-  completed outputs, and handoff blocks.
-- `InterAgentState` is the cross-agent evidence state. It should carry compact
-  evidence references, samples, lineage, caveats, and source views; raw rows
-  should not be embedded as an unbounded payload.
-- `FinalAnswerHandoff` is the compact bridge into final answer composition.
-  It must preserve evidence semantics instead of degrading structured evidence
-  into a generic text digest.
-- Invalid contracts, missing required fields, and broken invariants should fail
-  fast with useful context. Broad exception swallowing or silent fallback is not
-  an acceptable recovery strategy.
+- `ToolContract` 记录本轮 route、allowed tools、required outputs、
+  completed outputs 和 handoff blocks。
+- `InterAgentState` 是跨 agent 证据状态。它应该携带紧凑证据引用、样本、
+  lineage、caveats 和 source views；不要嵌入无界 raw rows。
+- `FinalAnswerHandoff` 是进入最终回答生成的紧凑桥梁。它必须保留证据语义，
+  不能把结构化证据降级成普通 text digest。
+- contract 无效、必填字段缺失、核心不变量破坏时，应带上下文 fast fail。
+  broad exception swallowing 或 silent fallback 不是可接受的恢复策略。
 
-## Maintenance Rules
+### `data_evidence` 字段级门禁
 
-When adding or changing an agent:
+`RawDataEvidencePayload` 是 SQL 工具产物进入 `InterAgentState` 前的硬门禁。
+它由 `gateway_core/agents/contracts/inter_agent_state.py` 中的 Pydantic 模型校验。
 
-1. Update `SKILL_REGISTRY`.
-2. Declare the owned outputs and default tools.
-3. Update this inventory.
-4. Add or update focused tests for routing, output ownership, and stream behavior.
+必填字段：
 
-When adding or changing a tool:
+- `task_id`
+- `allowed`，且必须为 `True`
+- `intent`
+- `dataset_label`
+- `row_count`
+- `sql_lineage`
+- `evidence_summary`
+- `raw_sql_handle`
 
-1. Put shared tool behavior behind `GatewayToolRegistry` unless it is strictly
-   internal to one executor.
-2. Declare aliases, tags, risk level, and scopes.
-3. Map tool output to an output contract field when it contributes to final
-   answer evidence or artifacts.
-4. Update this inventory and registry tests.
+样本和截断规则：
 
-When adding or changing a prompt:
+- `row_count > 0` 时，必须提供 `row_sample` 或 `display_rows`。
+- 样本截断只能使用原生切片，并必须在 `RawDataPolicy` 中保留
+  `original_count`、`included_count`、`truncated`。
+- `ToolContract` 只有在 `validate_data_evidence_payload()` 通过后，才能标记
+  `data_evidence` completed。
+- `InterAgentState` 保留 ref/sample/lineage/counts，不嵌入无界 `raw_rows`。
 
-1. Prefer `PromptTemplate` registration over inline strings.
-2. Version the prompt id.
-3. Keep output schemas in `gateway_core/agents/contracts` and prompt-facing
-   schema text in `gateway_core/prompts/output_contracts`.
-4. Update prompt layer tests and this inventory.
+## 维护规则
 
-When changing the School SQL handoff:
+新增或修改 agent 时：
 
-1. Start from `SCHOOL_DATA_ANSWER_WORKFLOW`.
-2. Preserve `InterAgentState` lineage and compact evidence semantics.
-3. Keep final prose generation in `answer.compose`, not inside the SQL executor.
-4. Run focused contract, prompt, and handoff tests before delivery.
+1. 更新 `SKILL_REGISTRY`。
+2. 声明归属输出和默认工具。
+3. 更新本 inventory。
+4. 增加或更新路由、输出归属、stream 行为相关测试。
 
-## Cleanup Route
+新增或修改 tool 时：
 
-Use this route when the goal is to make every agent, tool, and prompt explicit.
+1. 如果是共享工具，优先通过 `GatewayToolRegistry` 管理；只有严格属于单个
+   executor 的工具才保留为内部工具。
+2. 声明 aliases、tags、risk level 和 scopes。
+3. 如果 tool 输出会进入最终答案证据或 artifact，映射到 output contract 字段。
+4. 更新本 inventory 和 registry 测试。
 
-### Pass 1: Agents
+新增或修改 prompt 时：
 
-1. Start from `SKILL_REGISTRY`.
-2. For each skill, write down owned outputs, default tools, stream behavior, and
-   what it must not own.
-3. Compare each skill with workflow nodes. If a skill is actually a tool, remove
-   the agent shape; if a workflow node owns state, declare the contract.
-4. Verify with `tests/test_agent_tool_prompt_inventory.py` and agent-specific tests.
+1. 优先注册 `PromptTemplate`，不要新增 inline 长字符串。
+2. 维护明确的 prompt id 和版本。
+3. 输出 schema 放在 `gateway_core/agents/contracts`，面向 prompt 的 schema
+   文本放在 `gateway_core/prompts/output_contracts`。
+4. 更新 prompt layer 测试和本 inventory。
 
-### Pass 2: Tools
+修改 School SQL handoff 时：
 
-1. Start from `build_non_sql_tool_registry()` and `DDLReactTools.as_langchain_tools()`.
-2. Separate public gateway tools from executor-internal tools.
-3. For every public tool, declare canonical name, aliases, risk, scopes, and output field.
-4. Verify with `tests/test_gateway_tool_registry.py`,
-   `tests/test_langchain_tool_policy.py`, and `tests/test_agent_tool_prompt_inventory.py`.
+1. 从 `SCHOOL_DATA_ANSWER_WORKFLOW` 开始看。
+2. 保留 `InterAgentState` lineage 和紧凑证据语义。
+3. 最终自然语言表达留在 `answer.compose`，不要塞进 SQL executor。
+4. 交付前运行 contract、prompt、handoff 相关聚焦测试。
 
-### Pass 3: Prompts
+## 清理路线
 
-1. Start from `PROMPT_REGISTRY`.
-2. Every production prompt needs a stable prompt id, explicit version, one owner,
-   and one responsibility.
-3. Stable rules belong in `gateway_core/prompts/rules`; schema text belongs in
-   `gateway_core/prompts/output_contracts`; runtime values may remain inline.
-4. Verify with `tests/test_prompt_layer.py` and `tests/test_agent_tool_prompt_inventory.py`.
+当目标是把所有 agent、tool、prompt 都显式化时，按这个顺序走。
 
-### Pass 4: Contracts And Handoffs
+### Pass 1：Agents
 
-1. Start from `output_contracts.py`, `workflow_contracts.py`,
-   `tool_contract.py`, and `inter_agent_state.py`.
-2. Check that each output has exactly one owner and one downstream consumer path.
-3. Check that compact handoffs preserve lineage, counts, samples, caveats, and
-   source views without embedding unbounded raw rows.
-4. Verify with `tests/test_output_contracts.py`, `tests/test_tool_contract.py`,
-   `tests/test_workflow_contracts.py`, and handoff-focused tests.
+1. 从 `SKILL_REGISTRY` 开始。
+2. 对每个 skill 写清楚归属输出、默认工具、stream 行为，以及它不能负责什么。
+3. 和 workflow nodes 对照。如果某个 skill 实际是 tool，就移除 agent 形态；
+   如果某个 workflow node 持有状态，就声明 contract。
+4. 用 `tests/test_agent_tool_prompt_inventory.py` 和 agent 专项测试验证。
 
-### Standard Verification
+### Pass 2：Tools
+
+1. 从 `build_non_sql_tool_registry()` 和 `DDLReactTools.as_langchain_tools()` 开始。
+2. 区分公共 gateway tools 与 executor 内部工具。
+3. 每个公共 tool 都要声明 canonical name、aliases、risk、scopes 和 output field。
+4. 用 `tests/test_gateway_tool_registry.py`、`tests/test_langchain_tool_policy.py`
+   和 `tests/test_agent_tool_prompt_inventory.py` 验证。
+
+### Pass 3：Prompts
+
+1. 从 `PROMPT_REGISTRY` 开始。
+2. 每个生产 prompt 都要有稳定 prompt id、明确 version、一个 owner、一个 responsibility。
+3. 稳定规则放在 `gateway_core/prompts/rules`；schema 文本放在
+   `gateway_core/prompts/output_contracts`；运行时值可以保留 inline。
+4. 用 `tests/test_prompt_layer.py` 和 `tests/test_agent_tool_prompt_inventory.py` 验证。
+
+### Pass 4：Contracts And Handoffs
+
+1. 从 `output_contracts.py`、`workflow_contracts.py`、`tool_contract.py`
+   和 `inter_agent_state.py` 开始。
+2. 检查每个 output 是否只有一个 owner 和一条明确下游消费路径。
+3. 检查紧凑 handoff 是否保留 lineage、counts、samples、caveats、
+   source views，且不嵌入无界 raw rows。
+4. 用 `tests/test_output_contracts.py`、`tests/test_tool_contract.py`、
+   `tests/test_workflow_contracts.py` 和 handoff 专项测试验证。
+
+### 标准验证
 
 ```bash
 python3 scripts/check_file_size.py docs/agent_tool_prompt_inventory.md tests/test_agent_tool_prompt_inventory.py --verbose

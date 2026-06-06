@@ -17,9 +17,7 @@ from gateway_core.agents.streaming.langgraph_event_stream import (
     record_langgraph_event_as_trace_step,
 )
 from gateway_core.agents.contracts import build_tool_contract
-from gateway_core.agents.contracts.workflow_contracts import (
-    SCHOOL_DATA_ANSWER_WORKFLOW,
-)
+from gateway_core.agents.contracts.workflow_contracts import SCHOOL_DATA_ANSWER_WORKFLOW
 from gateway_core.agents.contracts.workflow_trace import (
     record_workflow_start,
     workflow_input_payload,
@@ -257,6 +255,7 @@ async def stream_school_sql_agent_native(
             return
         disabled_tools = {str(name or "").strip() for name in disabled_tool_names if str(name or "").strip()}
         tool_contract = build_tool_contract(question, plan=contract_plan)
+        tools.tool_contract = tool_contract
         _prune_tool_contract_for_disabled_tools(tool_contract, disabled_tools)
         tool_list = [
             *tools.as_langchain_tools(),

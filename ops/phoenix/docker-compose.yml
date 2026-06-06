@@ -1,0 +1,23 @@
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: conduct-phoenix
+    restart: unless-stopped
+    ports:
+      - "${PHOENIX_PORT:-16006}:6006"
+      - "${PHOENIX_GRPC_PORT:-4317}:4317"
+    volumes:
+      - phoenix_data:/mnt/data
+    environment:
+      - PHOENIX_WORKING_DIR=/mnt/data
+    networks:
+      - default
+      - gateway_net
+
+volumes:
+  phoenix_data:
+
+networks:
+  gateway_net:
+    external: true
+    name: conduct_yili_net

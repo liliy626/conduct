@@ -56,6 +56,7 @@ def test_inter_agent_state_uses_ref_sample_and_lineage_without_raw_rows() -> Non
             "ddl_sql_query_1": {
                 "intent": "raw_sql_select",
                 "dataset_label": "教师销假_请假明细",
+                "allowed": True,
                 "row_count": 87,
                 "total_row_count": 87,
                 "query_may_have_more": False,

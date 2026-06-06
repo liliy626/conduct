@@ -16,15 +16,26 @@ class GatewayToolRegistry:
             raise ValueError("tool name is required")
         if name in self._tools:
             raise ValueError(f"tool already registered: {name}")
-        self._tools[name] = tool
+
+        aliases: list[str] = []
+        seen_aliases: set[str] = set()
         for alias in getattr(tool, "aliases", ()) or ():
             clean_alias = _clean_name(alias)
-            if not clean_alias:
+            if not clean_alias or clean_alias == name or clean_alias in seen_aliases:
                 continue
-            if clean_alias in self._aliases and self._aliases[clean_alias] != name:
+            seen_aliases.add(clean_alias)
+            aliases.append(clean_alias)
+
+        if name in self._aliases:
+            raise ValueError(f"tool name conflicts with registered alias: {name}")
+        for clean_alias in aliases:
+            if clean_alias in self._aliases:
                 raise ValueError(f"tool alias already registered: {clean_alias}")
-            if clean_alias in self._tools and clean_alias != name:
+            if clean_alias in self._tools:
                 raise ValueError(f"tool alias conflicts with registered tool: {clean_alias}")
+
+        self._tools[name] = tool
+        for clean_alias in aliases:
             self._aliases[clean_alias] = name
 
     def get(self, name_or_alias: str) -> GatewayTool | None:

@@ -199,8 +199,17 @@ def test_handoff_payload_with_tool_evidence_restores_data_evidence() -> None:
     tools = SimpleNamespace(
         evidence_by_task={
             "ddl_sql_query_1": {
+                "task_id": "ddl_sql_query_1",
+                "allowed": True,
+                "intent": "raw_sql_select",
+                "dataset_label": "班级概况",
+                "row_count": 1,
+                "raw_sql_handle": "trace://current/task/ddl_sql_query_1/raw_rows",
+                "row_sample": [{"班级": "预备1班"}],
+                "sql_lineage": {"tables_used": ["班级概况"], "row_count": 1},
                 "evidence_summary": {
-                    "truth_data_markdown": "【真实数据快照】\n| 班级 |\n| --- |\n| 预备1班 |"
+                    "truth_data_markdown": "【真实数据快照】\n| 班级 |\n| --- |\n| 预备1班 |",
+                    "row_sample": [{"班级": "预备1班"}],
                 }
             }
         }
@@ -214,9 +223,7 @@ def test_handoff_payload_with_tool_evidence_restores_data_evidence() -> None:
     )
 
     assert payload["data_evidence"] == tools.evidence_by_task
-    assert payload["inter_agent_state"]["data_evidence"]["ddl_sql_query_1"]["ref"]["id"].startswith(
-        "task:ddl_sql_query_1"
-    )
+    assert payload["inter_agent_state"]["data_evidence"]["ddl_sql_query_1"]["ref"]["id"].startswith("trace://")
 
 
 def test_sanitize_final_answer_removes_agent_process_preamble() -> None:

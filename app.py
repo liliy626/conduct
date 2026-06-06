@@ -21,6 +21,7 @@ from gateway_core.runtime.admin.endpoints import (
     route_school_trace_detail,
     route_school_trace_dashboard_html,
     route_school_trace_recent,
+    route_phoenix_status,
     route_recent_question_monitor,
     route_reload_config,
     route_token_usage,
@@ -126,6 +127,12 @@ def token_usage_dashboard() -> str:
 def langfuse_status_endpoint(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     """返回 Langfuse 控制台接入状态。"""
     return route_langfuse_status(authorization)
+
+
+@app.get("/v1/admin/phoenix/status")
+def phoenix_status_endpoint(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    """返回 Phoenix 控制台接入状态。"""
+    return route_phoenix_status(authorization)
 
 
 @app.get("/v1/admin/school-traces/{trace_id}")

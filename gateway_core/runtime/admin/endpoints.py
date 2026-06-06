@@ -20,6 +20,7 @@ from gateway_core.runtime.admin.school_trace_metrics import (
 from gateway_core.runtime.runtime_context import _hash_token_for_monitor, _read_question_monitor_recent, _require_gateway_auth
 from gateway_core.infra.api_keys import current_api_key_record, is_admin_record, is_policy_record, is_school_record
 from gateway_core.observability.langfuse_exporter import langfuse_status
+from gateway_core.observability.phoenix_exporter import phoenix_status
 from gateway_core.school.trace import build_trace_timing, get_trace, recent_traces
 
 def route_health() -> Dict[str, Any]:
@@ -99,6 +100,11 @@ def route_token_usage(authorization: Optional[str], limit: int = 1000) -> Dict[s
 def route_langfuse_status(authorization: Optional[str] = None) -> Dict[str, Any]:
     _require_gateway_auth(authorization)
     return langfuse_status()
+
+
+def route_phoenix_status(authorization: Optional[str] = None) -> Dict[str, Any]:
+    _require_gateway_auth(authorization)
+    return phoenix_status()
 
 
 def route_school_trace_detail(authorization: Optional[str], trace_id: str) -> Dict[str, Any]:
