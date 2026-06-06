@@ -526,14 +526,11 @@ def _ddl_vector_context(schema_index: Any) -> str:
 
 
 def _contract_business_prompt_context(*, question: str, school_id: str = "") -> str:
-    try:
-        output = BusinessPromptContextTool().run(
-            AgentToolInput(arguments={"question": question}),
-            ToolExecutionContext(tenant_id=school_id, metadata={"layer": "contract_planner"}),
-        )
-        payload = output.to_dict()
-    except Exception as exc:
-        payload = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    output = BusinessPromptContextTool().run(
+        AgentToolInput(arguments={"question": question}),
+        ToolExecutionContext(tenant_id=school_id, metadata={"layer": "contract_planner"}),
+    )
+    payload = output.to_dict()
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 

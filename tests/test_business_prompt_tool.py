@@ -37,6 +37,14 @@ def test_business_prompt_context_keeps_teacher_development_for_title_or_honor_qu
     assert any("积分" in item or "成果" in item for item in content["evidence_boundaries"])
 
 
+def test_business_prompt_context_maps_eye_exercise_discipline_to_moral_education() -> None:
+    content = _content_for("眼保健操纪律最差的年级是哪个？")
+
+    assert content["domain"] == "moral_education"
+    assert content["role_context"]["role_name"] == "德育处/年级组长/班主任"
+    assert any("检查方" in item and "扣分类别" in item for item in content["evidence_boundaries"])
+
+
 def test_business_prompt_context_returns_principal_role_prompt_pack() -> None:
     content = _content_for_args({"question": "学校最近有什么异常", "user_role": "校长"})
 

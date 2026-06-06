@@ -48,7 +48,7 @@ def _resolve_domain(*, question: str, domain_hint: str, evidence_types: list[str
         return "teacher_profile"
     if any(token in text for token in ("职称", "荣誉", "成果", "积分", "述职", "教师发展", "申报", "培养")):
         return "teacher_development"
-    if any(token in text for token in ("德育", "扣分", "行规", "两操", "卫生", "班级表现")):
+    if any(token in text for token in ("德育", "扣分", "行规", "两操", "眼保健操", "违纪", "纪律最差", "卫生", "班级表现")):
         return "moral_education"
     if any(token in text for token in ("门禁", "访客", "消防", "演练", "隐患", "安防", "安全")):
         return "safety_security"
