@@ -56,7 +56,15 @@ def apply_agent_stream_process_header(request: Any) -> bool:
         header = str(request.headers.get("X-Agent-Stream-Process") or "")
     except Exception:
         header = ""
-    enabled = header.strip().lower() in {"1", "true", "yes", "on"}
+    clean_header = header.strip().lower()
+    if clean_header:
+        enabled = clean_header in {"1", "true", "yes", "on"}
+    else:
+        enabled = _env_value(
+            "SCHOOL_AGENT_STREAM_PROCESS_DEFAULT",
+            "TENANT_AGENT_STREAM_PROCESS_DEFAULT",
+            "1",
+        ).lower() not in {"0", "false", "no", "off", "hidden", "disabled"}
     set_agent_stream_process_requested(enabled)
     return enabled
 

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from gateway_core.agents.streaming.context import set_agent_stream_process_requested
-from gateway_core.api.openai_compat.agent_native_flow import build_agent_process_stream_chunk
+from gateway_core.api.openai_compat.agent_native_flow import apply_agent_stream_process_header, build_agent_process_stream_chunk
 
 
 def _content_chunk(text: str) -> str:
@@ -15,6 +16,48 @@ def _content_chunk(text: str) -> str:
 
 def _chunk_payload(chunk: str) -> dict:
     return json.loads(chunk.removeprefix("data: ").strip())
+
+
+def test_process_stream_header_defaults_on_for_openwebui(monkeypatch) -> None:
+    monkeypatch.delenv("SCHOOL_AGENT_STREAM_PROCESS_DEFAULT", raising=False)
+    monkeypatch.delenv("TENANT_AGENT_STREAM_PROCESS_DEFAULT", raising=False)
+    request = SimpleNamespace(headers={})
+
+    assert apply_agent_stream_process_header(request) is True
+
+    chunk = build_agent_process_stream_chunk(
+        model_id="m",
+        completion_id="c",
+        created=1,
+        text="正在查数据",
+        content_chunk_fn=_content_chunk,
+    )
+
+    assert _chunk_payload(chunk)["choices"][0]["delta"] == {"reasoning_content": "正在查数据"}
+    set_agent_stream_process_requested(False)
+
+
+def test_process_stream_header_can_disable_process_output() -> None:
+    request = SimpleNamespace(headers={"X-Agent-Stream-Process": "false"})
+
+    assert apply_agent_stream_process_header(request) is False
+
+    chunk = build_agent_process_stream_chunk(
+        model_id="m",
+        completion_id="c",
+        created=1,
+        text="正在查数据",
+        content_chunk_fn=_content_chunk,
+    )
+
+    assert chunk == ""
+
+
+def test_process_stream_default_can_be_disabled_by_env(monkeypatch) -> None:
+    monkeypatch.setenv("SCHOOL_AGENT_STREAM_PROCESS_DEFAULT", "0")
+    request = SimpleNamespace(headers={})
+
+    assert apply_agent_stream_process_header(request) is False
 
 
 def test_process_stream_is_hidden_unless_requested(monkeypatch) -> None:
