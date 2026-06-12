@@ -250,9 +250,9 @@ def _experience_row_to_dict(row: Any) -> dict[str, Any]:
     if len(row) >= 9 and not _is_int_like(row[4]):
         return {
             "question": str(row[0] or ""),
-            "raw_sql": str(row[3] or ""),
+            "raw_sql": _clip_sql(row[3]),
             "table_refs": _loads_json(row[2], fallback=[]),
-            "column_refs": extract_column_refs(str(row[3] or "")),
+            "column_refs": extract_column_refs(str(row[3] or ""))[:20],
             "row_count": int(row[5] or 0),
             "used_count": 0,
             "guardrail_version": "",
@@ -261,9 +261,9 @@ def _experience_row_to_dict(row: Any) -> dict[str, Any]:
         }
     return {
         "question": str(row[0] or ""),
-        "raw_sql": str(row[1] or ""),
+        "raw_sql": _clip_sql(row[1]),
         "table_refs": _loads_json(row[2], fallback=[]),
-        "column_refs": _loads_json(row[3], fallback=[]),
+        "column_refs": _loads_json(row[3], fallback=[])[:20],
         "row_count": int(row[4] or 0),
         "used_count": int(row[5] or 0),
         "guardrail_version": str(row[6] or ""),
@@ -278,6 +278,17 @@ def _is_int_like(value: Any) -> bool:
         return True
     except Exception:
         return False
+
+
+def _clip_sql(value: Any) -> str:
+    clean = str(value or "").strip()
+    try:
+        limit = max(300, min(int(os.getenv("SQL_HISTORY_RECALL_SQL_MAX_CHARS", "900") or "900"), 3000))
+    except Exception:
+        limit = 900
+    if len(clean) <= limit:
+        return clean
+    return clean[:limit].rstrip() + " ...[truncated]"
 
 
 def _table_refs_from_used_datasets(used_datasets: list[dict[str, Any]] | list[str] | None) -> list[str]:

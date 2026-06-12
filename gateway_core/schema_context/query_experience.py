@@ -64,9 +64,10 @@ def experience_summary_text(evidence_summary: dict[str, Any]) -> str:
 
 def experience_top_k() -> int:
     try:
-        return max(1, min(int(_env_value("SQL_HISTORY_TOP_K", "TENANT_QUERY_EXPERIENCE_TOP_K", "5") or "5"), _experience_max_k()))
+        requested = int(_env_value("SQL_HISTORY_TOP_K", "TENANT_QUERY_EXPERIENCE_TOP_K", "3") or "3")
+        return max(1, min(requested, _experience_normal_hard_max_k()))
     except Exception:
-        return 5
+        return 3
 
 
 def experience_top_k_for_question(question: str) -> int:
@@ -74,17 +75,32 @@ def experience_top_k_for_question(question: str) -> int:
     complex_tokens = ["总体", "趋势", "对比", "为什么", "建议", "差距", "适合", "主要", "分布", "排名", "异常"]
     if any(token in text for token in complex_tokens):
         try:
-            return max(1, min(int(os.getenv("SQL_HISTORY_COMPLEX_TOP_K", "8") or "8"), _experience_max_k()))
+            requested = int(os.getenv("SQL_HISTORY_COMPLEX_TOP_K", "4") or "4")
+            return max(1, min(requested, _experience_complex_hard_max_k()))
         except Exception:
-            return min(8, _experience_max_k())
+            return _experience_complex_hard_max_k()
     return experience_top_k()
 
 
 def _experience_max_k() -> int:
     try:
-        return max(1, min(int(os.getenv("SQL_HISTORY_MAX_K", "10") or "10"), 20))
+        return max(1, min(int(os.getenv("SQL_HISTORY_MAX_K", "6") or "6"), 6))
     except Exception:
-        return 10
+        return 6
+
+
+def _experience_normal_hard_max_k() -> int:
+    try:
+        return max(1, min(int(os.getenv("SQL_HISTORY_TOP_K_HARD_MAX", "3") or "3"), _experience_max_k()))
+    except Exception:
+        return 3
+
+
+def _experience_complex_hard_max_k() -> int:
+    try:
+        return max(1, min(int(os.getenv("SQL_HISTORY_COMPLEX_TOP_K_HARD_MAX", "4") or "4"), _experience_max_k()))
+    except Exception:
+        return 4
 
 
 def experience_schema(source_schema: str = "") -> str:

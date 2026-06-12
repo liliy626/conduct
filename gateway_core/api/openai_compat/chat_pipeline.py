@@ -42,6 +42,10 @@ from gateway_core.api.openai_compat.agent_native_flow import (
     run_agent_native_stream,
     run_policy_only_agent_native_stream,
 )
+from gateway_core.api.openai_compat.agent_native_non_stream import (
+    run_agent_native_non_stream,
+    run_policy_only_agent_native_non_stream,
+)
 from gateway_core.api.openai_compat.chat_pipeline_parts import request_parts, response_parts
 from gateway_core.api.openai_compat.pipeline_response_tools import build_pipeline_response_tools
 from gateway_core.api.openai_compat.pipeline_setup_flow import prepare_pipeline_setup
@@ -261,6 +265,23 @@ async def run_chat_completions(
             context_present=True,
             cache_hit=False,
         )
+        if not setup.pipeline_ctx.stream:
+            payload = await run_policy_only_agent_native_non_stream(
+                spec=setup.spec,
+                effective_question=setup.effective_question,
+                token=setup.token,
+                completion_id=setup.completion_id,
+                openwebui_chat_id=openwebui_chat_id,
+                monitor_base=monitor_base,
+                response_tools=response_tools,
+                runtime_response_fns=runtime_response_fns,
+                model=resolve_agent_native_model(setup.client),
+                policy_evidence_search_fn=policy_evidence_search_fn,
+                conversation_context=conversation_context,
+                conversation_memory_key=conversation_memory_key_value,
+                monitor_answer_preview_fn=_monitor_answer_preview,
+            )
+            return JSONResponse(payload)
         return _streaming_sse_response(
             run_policy_only_agent_native_stream(
                 spec=setup.spec,
@@ -291,6 +312,25 @@ async def run_chat_completions(
             context_present=True,
             cache_hit=False,
         )
+        if not setup.pipeline_ctx.stream:
+            payload = await run_agent_native_non_stream(
+                spec=setup.spec,
+                pipeline_ctx=setup.pipeline_ctx,
+                effective_question=setup.effective_question,
+                token=setup.token,
+                school_scope=setup.x_school_scope,
+                completion_id=setup.completion_id,
+                openwebui_chat_id=openwebui_chat_id,
+                monitor_base=monitor_base,
+                response_tools=response_tools,
+                runtime_response_fns=runtime_response_fns,
+                model=resolve_agent_native_model(setup.client),
+                policy_evidence_search_fn=policy_evidence_search_fn,
+                conversation_context=conversation_context,
+                conversation_memory_key=conversation_memory_key_value,
+                monitor_answer_preview_fn=_monitor_answer_preview,
+            )
+            return JSONResponse(payload)
         return _streaming_sse_response(
             run_agent_native_stream(
                 spec=setup.spec,

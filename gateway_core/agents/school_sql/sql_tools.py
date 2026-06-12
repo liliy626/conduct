@@ -97,6 +97,11 @@ class DDLReactTools:
         self.selected_datasets_by_id: dict[str, dict[str, str]] = {}
         self.allowed_table_refs: list[str] = []
         self.ddl_contexts: list[dict[str, Any]] = []
+        self._inspected_schema_payloads: dict[str, dict[str, Any]] = {}
+        self._seen_ddl_table_refs: set[str] = set()
+        self._seen_ddl_result_signatures: dict[str, int] = {}
+        self._sql_task_by_query_hash: dict[str, str] = {}
+        self._pending_sql_experiences: list[dict[str, Any]] = []
         self.json_sampled_refs: set[str] = set()
         self._sql_query_counter = 0
         self._sql_query_counter_lock = threading.Lock()
@@ -255,6 +260,12 @@ class DDLReactTools:
                 payload = {"source": "information_schema", "allowed": False, "error": "invalid_table_name"}
                 set_step_output(step, payload)
                 return json.dumps(payload, ensure_ascii=False, default=str)
+            table_ref_text = f"{table_ref[0]}.{table_ref[1]}"
+            cached_payload = self._inspected_schema_payloads.get(_normalize_ref(table_ref_text))
+            if cached_payload is not None:
+                payload = _inspect_schema_reuse_payload(cached_payload)
+                set_step_output(step, payload)
+                return json.dumps(payload, ensure_ascii=False, default=str)
             try:
                 columns = _inspect_table_columns(
                     psycopg_module=self.psycopg_module,
@@ -275,26 +286,27 @@ class DDLReactTools:
                         "source": "information_schema",
                         "allowed": False,
                         "error": "table_not_found_or_no_columns",
-                        "table_ref": f"{table_ref[0]}.{table_ref[1]}",
+                        "table_ref": table_ref_text,
                     }
                 else:
-                    self._remember_table_ref(f"{table_ref[0]}.{table_ref[1]}")
+                    self._remember_table_ref(table_ref_text)
                     payload = {
                         "source": "information_schema",
                         "allowed": True,
                         "schema_name": table_ref[0],
                         "table_name": table_ref[1],
-                        "table_ref": f"{table_ref[0]}.{table_ref[1]}",
+                        "table_ref": table_ref_text,
                         "column_count": len(columns),
                         "columns": columns,
                         "ddl_summary": ddl_summary,
                     }
+                    self._inspected_schema_payloads[_normalize_ref(table_ref_text)] = dict(payload)
             except Exception as exc:
                 payload = {
                     "source": "information_schema",
                     "allowed": False,
                     "error": str(exc),
-                    "table_ref": f"{table_ref[0]}.{table_ref[1]}",
+                    "table_ref": table_ref_text,
                 }
             set_step_output(
                 step,
@@ -627,32 +639,57 @@ class DDLReactTools:
                 top_k=_ddl_top_k(),
                 max_chars_per_doc=_ddl_max_chars_per_doc(),
             )
+            context_plan = _ddl_search_context_plan(
+                result.table_refs,
+                seen_table_refs=self._seen_ddl_table_refs,
+                seen_result_signatures=self._seen_ddl_result_signatures,
+            )
             self._remember_ddl_context(result, query=clean_query)
-            coverage_map = self._probe_candidate_evidence_map(result.table_refs, query=clean_query)
+            self._mark_ddl_refs_seen(result.table_refs)
+            coverage_map = self._probe_candidate_evidence_map(context_plan["new_table_refs"], query=clean_query)
+            documents = [
+                {
+                    "table_name": item.table_name,
+                    "business_description": item.business_description,
+                    "similarity": item.similarity,
+                }
+                for item in result.documents
+                if _normalize_ref(f"{result.schema_name}.{item.table_name}") in context_plan["new_table_ref_keys"]
+            ]
             payload = {
                 "source": "ddl_vector_documents",
                 "schema_name": result.schema_name,
                 "query": clean_query,
                 "doc_count": len(result.documents),
                 "table_refs": result.table_refs,
+                "new_table_refs": context_plan["new_table_refs"],
+                "known_table_refs": context_plan["known_table_refs"],
+                "duplicate_result": context_plan["duplicate_result"],
                 "candidate_evidence_map": coverage_map,
                 "from_cache": result.from_cache,
                 "error": result.error,
-                "documents": [
-                    {
-                        "table_name": item.table_name,
-                        "business_description": item.business_description,
-                        "similarity": item.similarity,
-                    }
-                    for item in result.documents
-                ],
+                "documents": documents,
+                "omitted_known_document_count": max(0, len(result.documents) - len(documents)),
                 "next_step_hint": (
-                    "先阅读 candidate_evidence_map：优先选择 current_period_count>0 或 latest_time 最新的活跃表；"
-                    "对 likely_stale/empty 的旧表不要直接下结论为 0。"
-                    "再从 table_refs 中选择相关表，调用 inspect_table_schema 获取精确字段；不要把无关表结构继续带入后续推理。"
+                    "本次 ddl_search 没有带来新候选表；不要继续换词重复 ddl_search，"
+                    "应基于已有 table_refs/known_table_refs 调用 inspect_table_schema 或 sql_db_query，"
+                    "证据足够时调用 final_answer_handoff。"
+                    if context_plan["duplicate_result"] or not context_plan["new_table_refs"]
+                    else (
+                        "先阅读 candidate_evidence_map：优先选择 current_period_count>0 或 latest_time 最新的活跃表；"
+                        "对 likely_stale/empty 的旧表不要直接下结论为 0。"
+                        "再从 new_table_refs/table_refs 中选择相关表，调用 inspect_table_schema 获取精确字段；"
+                        "不要把 known_table_refs 重复带入后续推理。"
+                    )
                 ),
             }
-            if _ddl_search_returns_full_ddl():
+            if context_plan["duplicate_result"] or not context_plan["new_table_refs"]:
+                payload["ddl_omitted_reason"] = (
+                    "duplicate_ddl_search_result_already_returned"
+                    if context_plan["duplicate_result"]
+                    else "ddl_search_returned_only_known_table_refs"
+                )
+            elif _ddl_search_returns_full_ddl():
                 payload["ddl"] = result.ddl
             else:
                 payload["ddl_preview"] = _ddl_search_preview(result.ddl)
@@ -662,10 +699,14 @@ class DDLReactTools:
                 {
                     "doc_count": payload["doc_count"],
                     "table_refs": payload["table_refs"],
+                    "new_table_refs": payload["new_table_refs"],
+                    "known_table_refs": payload["known_table_refs"],
+                    "duplicate_result": payload["duplicate_result"],
                     "ddl_chars": len(result.ddl),
                     "from_cache": result.from_cache,
                     "error": result.error,
                     "documents": payload["documents"],
+                    "omitted_known_document_count": payload["omitted_known_document_count"],
                     "candidate_evidence_map": coverage_map,
                 },
             )
@@ -734,7 +775,7 @@ class DDLReactTools:
                 payload = {
                     "source": "school_schema",
                     "allowed": False,
-                "error": "ddl_search_required_before_sql_db_query",
+                    "error": "ddl_search_required_before_sql_db_query",
                 }
                 set_step_output(step, payload)
                 return json.dumps(payload, ensure_ascii=False, default=str)
@@ -752,6 +793,23 @@ class DDLReactTools:
                     "error": guardrail.reason,
                     "referenced_views": guardrail.referenced_views,
                     "blocked_tokens": guardrail.blocked_tokens,
+                }
+                set_step_output(step, payload)
+                return json.dumps(payload, ensure_ascii=False, default=str)
+            query_hash = hashlib.sha256(str(guardrail.sql or "").encode("utf-8")).hexdigest()
+            duplicate_task_id = self._sql_task_by_query_hash.get(query_hash)
+            if duplicate_task_id:
+                previous = self.evidence_by_task.get(duplicate_task_id, {})
+                payload = {
+                    "source": "school_schema",
+                    "allowed": True,
+                    "duplicate_sql": True,
+                    "duplicate_of_task_id": duplicate_task_id,
+                    "sql_hash": query_hash,
+                    "row_count": previous.get("row_count"),
+                    "evidence_summary": previous.get("evidence_summary"),
+                    "referenced_views": previous.get("referenced_views", guardrail.referenced_views),
+                    "message": "同一条 SQL 本轮已经执行过；这里返回前一次结果摘要引用，避免重复工具上下文。",
                 }
                 set_step_output(step, payload)
                 return json.dumps(payload, ensure_ascii=False, default=str)
@@ -943,6 +1001,7 @@ class DDLReactTools:
             display_payload.update(entity_stats)
             payload.update(display_payload)
             self.evidence_by_task[task_id] = payload
+            self._sql_task_by_query_hash[query_hash] = task_id
             for item in selected:
                 self.selected_datasets_by_id[item["dataset_id"]] = item
                 view = str(item.get("source_view") or "").strip()
@@ -950,14 +1009,15 @@ class DDLReactTools:
                     self.source_views.append(view)
             board_snapshot = self._record_evidence_board(task_id, payload, rows=formatted_rows)
             payload["evidence_board"] = board_snapshot
-            experience_recorded = self._record_sql_experience(
+            experience_pending = self._queue_sql_experience_candidate(
                 task_id=task_id,
                 sql=guardrail.sql,
                 row_count=len(rows),
                 selected=selected,
                 referenced_views=guardrail.referenced_views,
             )
-            payload["experience_recorded"] = experience_recorded
+            payload["experience_recorded"] = False
+            payload["experience_pending"] = experience_pending
             set_step_output(
                 step,
                 {
@@ -979,7 +1039,8 @@ class DDLReactTools:
                     "query_may_have_more": query_may_have_more,
                     **entity_stats,
                     "evidence_board": board_snapshot,
-                    "experience_recorded": experience_recorded,
+                    "experience_recorded": False,
+                    "experience_pending": experience_pending,
                 },
             )
         return json.dumps(payload, ensure_ascii=False, default=str)
@@ -1169,6 +1230,12 @@ class DDLReactTools:
             }
         )
 
+    def _mark_ddl_refs_seen(self, refs: list[str]) -> None:
+        for ref in refs:
+            clean = _normalize_ref(ref)
+            if clean:
+                self._seen_ddl_table_refs.add(clean)
+
     def _remember_table_ref(self, ref: str) -> None:
         clean = str(ref or "").strip()
         if clean and clean not in self.allowed_table_refs:
@@ -1330,6 +1397,61 @@ class DDLReactTools:
             )
             return recorded
 
+    def _queue_sql_experience_candidate(
+        self,
+        *,
+        task_id: str,
+        sql: str,
+        row_count: int,
+        selected: list[dict[str, str]],
+        referenced_views: list[str],
+    ) -> bool:
+        if not _record_experience_enabled() or row_count <= 0:
+            return False
+        if not referenced_views:
+            return False
+        self._pending_sql_experiences.append(
+            {
+                "task_id": task_id,
+                "sql": sql,
+                "row_count": int(row_count or 0),
+                "selected": selected,
+                "referenced_views": referenced_views,
+            }
+        )
+        return True
+
+    def flush_sql_experience_candidates(self, *, final_status: str = "answered") -> dict[str, Any]:
+        pending = list(self._pending_sql_experiences)
+        self._pending_sql_experiences.clear()
+        if not pending:
+            return {"final_status": final_status, "candidate_count": 0, "recorded_count": 0}
+        if not self.evidence_by_task or not self.source_views:
+            return {
+                "final_status": final_status,
+                "candidate_count": len(pending),
+                "recorded_count": 0,
+                "skipped_reason": "missing_final_evidence",
+            }
+        max_items = _sql_history_success_max_writes()
+        selected_items = pending[:max_items]
+        recorded_count = 0
+        for item in selected_items:
+            if self._record_sql_experience(
+                task_id=str(item.get("task_id") or ""),
+                sql=str(item.get("sql") or ""),
+                row_count=int(item.get("row_count") or 0),
+                selected=item.get("selected") if isinstance(item.get("selected"), list) else [],
+                referenced_views=item.get("referenced_views") if isinstance(item.get("referenced_views"), list) else [],
+            ):
+                recorded_count += 1
+        return {
+            "final_status": final_status,
+            "candidate_count": len(pending),
+            "recorded_count": recorded_count,
+            "max_items": max_items,
+        }
+
     def _next_sql_task_id(self) -> str:
         with self._sql_query_counter_lock:
             self._sql_query_counter += 1
@@ -1379,6 +1501,63 @@ class DDLReactTools:
 def _ddl_search_returns_full_ddl() -> bool:
     mode = _env_value("SCHOOL_DDL_SEARCH_RESPONSE_MODE", "TENANT_DDL_SEARCH_RESPONSE_MODE", "compact").lower()
     return mode in {"full", "legacy", "raw"}
+
+
+def _ddl_search_context_plan(
+    table_refs: list[str],
+    *,
+    seen_table_refs: set[str],
+    seen_result_signatures: dict[str, int],
+) -> dict[str, Any]:
+    normalized_refs = [_normalize_ref(ref) for ref in table_refs if str(ref or "").strip()]
+    signature = "|".join(sorted(ref for ref in normalized_refs if ref))
+    seen_count = seen_result_signatures.get(signature, 0) if signature else 0
+    if signature:
+        seen_result_signatures[signature] = seen_count + 1
+
+    new_refs: list[str] = []
+    known_refs: list[str] = []
+    new_ref_keys: set[str] = set()
+    local_seen: set[str] = set()
+    for ref in table_refs:
+        clean_ref = str(ref or "").strip()
+        normalized = _normalize_ref(clean_ref)
+        if not clean_ref or not normalized or normalized in local_seen:
+            continue
+        local_seen.add(normalized)
+        if normalized in seen_table_refs:
+            known_refs.append(clean_ref)
+        else:
+            new_refs.append(clean_ref)
+            new_ref_keys.add(normalized)
+
+    return {
+        "signature": signature,
+        "duplicate_result": bool(signature and seen_count > 0),
+        "new_table_refs": new_refs,
+        "known_table_refs": known_refs,
+        "new_table_ref_keys": new_ref_keys,
+    }
+
+
+def _inspect_schema_reuse_payload(cached_payload: dict[str, Any]) -> dict[str, Any]:
+    columns = cached_payload.get("columns") if isinstance(cached_payload.get("columns"), list) else []
+    column_names = [
+        str(item.get("column_name") or "").strip()
+        for item in columns
+        if isinstance(item, dict) and str(item.get("column_name") or "").strip()
+    ]
+    return {
+        "source": "information_schema",
+        "allowed": bool(cached_payload.get("allowed")),
+        "schema_reused": True,
+        "table_ref": cached_payload.get("table_ref", ""),
+        "schema_name": cached_payload.get("schema_name", ""),
+        "table_name": cached_payload.get("table_name", ""),
+        "column_count": cached_payload.get("column_count", len(column_names)),
+        "known_column_names": column_names,
+        "message": "这张表的 schema 本轮已经 inspect 过；请复用前一次完整字段结果，不要重复 inspect_table_schema。",
+    }
 
 
 def _ddl_search_preview(ddl: str) -> str:
@@ -1644,6 +1823,13 @@ def _query_may_have_more(
         except Exception:
             pass
     return clean_row_count >= clean_limit or (bool(limit_applied) and clean_row_count >= clean_limit)
+
+
+def _sql_history_success_max_writes() -> int:
+    try:
+        return max(1, min(int(_env_value("SQL_HISTORY_SUCCESS_MAX_WRITES", default="3") or "3"), 8))
+    except Exception:
+        return 3
 
 
 def _count_sql_for_limited_select(sql: str) -> str:

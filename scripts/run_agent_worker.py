@@ -20,6 +20,28 @@ from gateway_core.agents.jobs.worker import AgentJobWorker
 from gateway_core.runtime.runtime_context import psycopg
 
 
+def _is_redis_retryable_error(exc: BaseException) -> bool:
+    exc_type = type(exc)
+    return exc_type.__name__ in {"TimeoutError", "ConnectionError"} and str(exc_type.__module__).startswith("redis.")
+
+
+async def read_agent_job_messages(
+    client: Any,
+    *,
+    group: str,
+    consumer: str,
+    queue_stream: str,
+    capacity: int,
+    block_ms: int,
+) -> Any:
+    try:
+        return await client.xreadgroup(group, consumer, {queue_stream: ">"}, count=capacity, block=block_ms)
+    except Exception as exc:
+        if _is_redis_retryable_error(exc):
+            return []
+        raise
+
+
 async def main() -> None:
     cfg = AgentJobConfig.from_env()
     queue = RedisAgentJobQueue(
@@ -71,7 +93,14 @@ async def main() -> None:
                 running.remove(task)
                 task.result()
             continue
-        result = await client.xreadgroup(group, consumer, {cfg.queue_stream: ">"}, count=capacity, block=5000)
+        result = await read_agent_job_messages(
+            client,
+            group=group,
+            consumer=consumer,
+            queue_stream=cfg.queue_stream,
+            capacity=capacity,
+            block_ms=5000,
+        )
         if not result:
             continue
         for _, messages in result:

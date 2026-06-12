@@ -5,12 +5,38 @@ import os
 import re
 from typing import Any
 
-from gateway_core.agents.streaming.context import set_agent_stream_process_requested
+from gateway_core.agents.streaming.context import agent_stream_process_requested, set_agent_stream_process_requested
 from gateway_core.infra.postgres_dsn import postgres_dsn
 from gateway_core.runtime import runtime_context as rt
 from gateway_core.conversation.session_memory import remember_conversation_turn
-from gateway_core.agents.school_sql.agent_stream import agent_native_enabled_for_token, stream_school_sql_agent_native
-from gateway_core.agents.policy_only.agent_stream import policy_only_agent_enabled_for_token, stream_policy_only_agent_native
+from gateway_core.api.openai_compat.agent_native_stream_filter import VisualMarkdownStreamFilter
+from gateway_core.api.openai_compat.source_compat import merge_openwebui_sources
+
+
+def agent_native_enabled_for_token(token: str) -> bool:
+    from gateway_core.agents.school_sql.agent_stream import agent_native_enabled_for_token as _enabled
+
+    return _enabled(token)
+
+
+async def stream_school_sql_agent_native(**kwargs: Any):
+    from gateway_core.agents.school_sql.agent_stream import stream_school_sql_agent_native as _stream
+
+    async for event in _stream(**kwargs):
+        yield event
+
+
+def policy_only_agent_enabled_for_token(token: str) -> bool:
+    from gateway_core.agents.policy_only.agent_stream import policy_only_agent_enabled_for_token as _enabled
+
+    return _enabled(token)
+
+
+async def stream_policy_only_agent_native(**kwargs: Any):
+    from gateway_core.agents.policy_only.agent_stream import stream_policy_only_agent_native as _stream
+
+    async for event in _stream(**kwargs):
+        yield event
 
 
 def _env_value(primary: str, legacy: str = "", default: str = "") -> str:
@@ -44,6 +70,26 @@ def _build_reasoning_stream_chunk(*, model_id: str, completion_id: str, created:
         "choices": [{"index": 0, "delta": {"reasoning_content": text}, "finish_reason": None}],
     }
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def build_agent_process_stream_chunk(*, model_id: str, completion_id: str, created: int, text: str, content_chunk_fn) -> str:
+    if not agent_stream_process_requested():
+        return ""
+    mode = _env_value(
+        "SCHOOL_AGENT_NATIVE_PROCESS_DELTA_MODE",
+        "TENANT_AGENT_NATIVE_PROCESS_DELTA_MODE",
+        "reasoning_content",
+    ).lower()
+    if mode in {"off", "hidden", "none", "disabled", "0", "false"}:
+        return ""
+    if mode in {"content", "plain"}:
+        return content_chunk_fn(text)
+    return _build_reasoning_stream_chunk(
+        model_id=model_id,
+        completion_id=completion_id,
+        created=created,
+        text=text,
+    )
 
 
 def resolve_agent_native_model(default_model: Any) -> Any:
@@ -94,7 +140,7 @@ async def run_agent_native_stream(
     answer_chunks: list[str] = []
     process_chunks: list[str] = []
     openwebui_sources: list[dict[str, Any]] = []
-    markdown_filter = _VisualMarkdownStreamFilter()
+    markdown_filter = VisualMarkdownStreamFilter()
 
     def _chunk(text: str) -> str:
         nonlocal first_token_ms
@@ -108,19 +154,22 @@ async def run_agent_native_stream(
 
     def _process_chunk(text: str) -> str:
         nonlocal first_token_ms
-        if first_token_ms is None:
-            first_token_ms = response_tools.elapsed_ms()
         process_chunks.append(text)
-        mode = _env_value("SCHOOL_AGENT_NATIVE_PROCESS_DELTA_MODE", "TENANT_AGENT_NATIVE_PROCESS_DELTA_MODE", "reasoning_content").lower()
-        if mode in {"content", "plain"}:
-            answer_chunks.append(text)
-            return runtime_response_fns.stream_chunk(spec.model_id, completion_id, text)
-        return _build_reasoning_stream_chunk(
+        chunk = build_agent_process_stream_chunk(
             model_id=spec.model_id,
             completion_id=completion_id,
             created=pipeline_ctx.now_ts_fn(),
             text=text,
+            content_chunk_fn=lambda value: runtime_response_fns.stream_chunk(spec.model_id, completion_id, value),
         )
+        if not chunk:
+            return ""
+        if first_token_ms is None:
+            first_token_ms = response_tools.elapsed_ms()
+        mode = _env_value("SCHOOL_AGENT_NATIVE_PROCESS_DELTA_MODE", "TENANT_AGENT_NATIVE_PROCESS_DELTA_MODE", "").lower()
+        if mode in {"content", "plain"}:
+            answer_chunks.append(text)
+        return chunk
 
     response_tools.log_monitor_event(
         {
@@ -153,13 +202,16 @@ async def run_agent_native_stream(
             if str(event.get("type") or "") == "sources":
                 sources = event.get("sources") if isinstance(event.get("sources"), list) else []
                 if sources:
-                    _merge_openwebui_sources(openwebui_sources, sources)
-                    yield runtime_response_fns.stream_chunk(spec.model_id, completion_id, "", sources=sources)
+                    added_sources = merge_openwebui_sources(openwebui_sources, sources)
+                    if added_sources:
+                        yield runtime_response_fns.stream_chunk(spec.model_id, completion_id, "", sources=added_sources)
                 continue
             text = str(event.get("text") or "")
             if text:
                 if str(event.get("type") or "") in {"process", "progress", "tool"}:
-                    yield _process_chunk(text)
+                    chunk = _process_chunk(text)
+                    if chunk:
+                        yield chunk
                 else:
                     yield _chunk(text)
     except Exception as exc:
@@ -235,7 +287,7 @@ async def run_policy_only_agent_native_stream(
     answer_chunks: list[str] = []
     process_chunks: list[str] = []
     openwebui_sources: list[dict[str, Any]] = []
-    markdown_filter = _VisualMarkdownStreamFilter()
+    markdown_filter = VisualMarkdownStreamFilter()
 
     def _chunk(text: str) -> str:
         nonlocal first_token_ms
@@ -249,19 +301,22 @@ async def run_policy_only_agent_native_stream(
 
     def _process_chunk(text: str) -> str:
         nonlocal first_token_ms
-        if first_token_ms is None:
-            first_token_ms = response_tools.elapsed_ms()
         process_chunks.append(text)
-        mode = _env_value("SCHOOL_AGENT_NATIVE_PROCESS_DELTA_MODE", "TENANT_AGENT_NATIVE_PROCESS_DELTA_MODE", "reasoning_content").lower()
-        if mode in {"content", "plain"}:
-            answer_chunks.append(text)
-            return runtime_response_fns.stream_chunk(spec.model_id, completion_id, text)
-        return _build_reasoning_stream_chunk(
+        chunk = build_agent_process_stream_chunk(
             model_id=spec.model_id,
             completion_id=completion_id,
             created=pipeline_ctx.now_ts_fn(),
             text=text,
+            content_chunk_fn=lambda value: runtime_response_fns.stream_chunk(spec.model_id, completion_id, value),
         )
+        if not chunk:
+            return ""
+        if first_token_ms is None:
+            first_token_ms = response_tools.elapsed_ms()
+        mode = _env_value("SCHOOL_AGENT_NATIVE_PROCESS_DELTA_MODE", "TENANT_AGENT_NATIVE_PROCESS_DELTA_MODE", "").lower()
+        if mode in {"content", "plain"}:
+            answer_chunks.append(text)
+        return chunk
 
     response_tools.log_monitor_event(
         {
@@ -288,13 +343,16 @@ async def run_policy_only_agent_native_stream(
             if str(event.get("type") or "") == "sources":
                 sources = event.get("sources") if isinstance(event.get("sources"), list) else []
                 if sources:
-                    _merge_openwebui_sources(openwebui_sources, sources)
-                    yield runtime_response_fns.stream_chunk(spec.model_id, completion_id, "", sources=sources)
+                    added_sources = merge_openwebui_sources(openwebui_sources, sources)
+                    if added_sources:
+                        yield runtime_response_fns.stream_chunk(spec.model_id, completion_id, "", sources=added_sources)
                 continue
             text = str(event.get("text") or "")
             if text:
                 if str(event.get("type") or "") in {"process", "progress", "tool"}:
-                    yield _process_chunk(text)
+                    chunk = _process_chunk(text)
+                    if chunk:
+                        yield chunk
                 else:
                     yield _chunk(text)
     except Exception as exc:
@@ -367,105 +425,3 @@ def log_agent_native_sql(
         sql,
         params,
     )
-
-
-def _merge_openwebui_sources(target: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> None:
-    seen = {_openwebui_source_url(item) for item in target}
-    for item in incoming:
-        if not isinstance(item, dict):
-            continue
-        url = _openwebui_source_url(item)
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        target.append(item)
-
-
-def _openwebui_source_url(source: dict[str, Any]) -> str:
-    nested = source.get("source") if isinstance(source.get("source"), dict) else {}
-    url = str(source.get("url") or nested.get("url") or "").strip()
-    if url:
-        return url
-    metadata = source.get("metadata")
-    if isinstance(metadata, list):
-        for item in metadata:
-            if isinstance(item, dict) and str(item.get("url") or "").strip():
-                return str(item.get("url") or "").strip()
-    return ""
-
-
-class _VisualMarkdownStreamFilter:
-    """Prevent model-written chart HTML links from being rendered as broken images."""
-
-    def __init__(self) -> None:
-        self._buffer = ""
-
-    def feed(self, text: str) -> str:
-        self._buffer += str(text or "")
-        return self._drain(final=False)
-
-    def flush(self) -> str:
-        return self._drain(final=True)
-
-    def _drain(self, *, final: bool) -> str:
-        output: list[str] = []
-        text = self._buffer
-        while text:
-            start = text.find("![")
-            if start < 0:
-                if final:
-                    output.append(text)
-                    text = ""
-                else:
-                    keep = 1 if text.endswith("!") else 0
-                    if len(text) > keep:
-                        output.append(text[:-keep] if keep else text)
-                        text = text[-keep:] if keep else ""
-                break
-            output.append(text[:start])
-            alt_end = text.find("]", start + 2)
-            if alt_end < 0:
-                if final:
-                    output.append(text[start:])
-                    text = ""
-                else:
-                    text = text[start:]
-                break
-            if alt_end + 1 >= len(text):
-                if final:
-                    output.append(text[start:])
-                    text = ""
-                else:
-                    text = text[start:]
-                break
-            if text[alt_end + 1] != "(":
-                output.append(text[start : start + 1])
-                text = text[start + 1 :]
-                continue
-            close = text.find(")", alt_end + 2)
-            if close < 0:
-                if final:
-                    output.append(text[start:])
-                    text = ""
-                else:
-                    text = text[start:]
-                break
-            alt = text[start + 2 : alt_end].strip() or "图表"
-            url = text[alt_end + 2 : close].strip()
-            if _is_broken_chart_image_url(url):
-                output.append(f"[查看图表：{alt}]({url})")
-            else:
-                output.append(text[start : close + 1])
-            text = text[close + 1 :]
-        self._buffer = text
-        return "".join(output)
-
-
-def _is_broken_chart_image_url(url: str) -> bool:
-    value = str(url or "").strip().lower()
-    if value.startswith("chart:"):
-        return True
-    if not value:
-        return False
-    path = value.split("?", 1)[0].split("#", 1)[0]
-    return ("/chart/" in path and path.endswith((".html", ".json"))) or path.endswith(".html")

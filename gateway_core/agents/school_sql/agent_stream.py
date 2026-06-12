@@ -19,6 +19,8 @@ from gateway_core.agents.contracts import ContractPlanner, build_tool_contract
 from gateway_core.tools.langchain_tools import build_langchain_agent_tools
 from gateway_core.conversation.threading import build_langgraph_thread_id
 from gateway_core.agents.school_sql.agent_model import agent_model_for_tool_loop
+from gateway_core.agents.school_sql.context_limit import build_context_limit_clarification, is_context_limit_error
+from gateway_core.agents.school_sql.final_handoff import should_emit_missing_handoff_draft
 from gateway_core.schema_context.ddl_embedding import ddl_embed_text
 from gateway_core.agents.school_sql.sql_tools import DDLReactTools
 from gateway_core.infra.api_keys import current_api_key_record, is_school_record
@@ -78,17 +80,6 @@ async def stream_school_sql_agent_native(
                     "key_type": record.key_type,
                 },
             )
-
-        if await _is_guard_router_chat(trace=trace, model=model, question=question):
-            async for chunk in _stream_guard_router_chat(
-                trace=trace,
-                model=model,
-                question=question,
-                conversation_context=conversation_context,
-            ):
-                yield {"type": "content", "text": chunk}
-            finish_trace(trace)
-            return
 
         schema_index = _build_agent_schema_index(
             trace=trace,
@@ -314,14 +305,35 @@ async def stream_school_sql_agent_native(
                         "the final answer is generated from collected tool evidence only."
                     ),
                 )
-            async for chunk in _stream_fast_final_answer(
-                trace=trace,
-                final_model=final_model,
-                question=question,
+            if should_emit_missing_handoff_draft(
+                draft_text=fallback_final_text,
                 handoff_payload=handoff_payload,
                 source_views=tools.source_views,
             ):
-                yield {"type": "content", "text": chunk}
+                with trace_step(
+                    trace,
+                    "agent_native.final_handoff_missing.promote_draft",
+                    {"question": question},
+                ) as step:
+                    set_step_output(
+                        step,
+                        {
+                            "reason": "missing final_answer_handoff and no collected tool evidence; preserving agent draft",
+                            "draft_chars": len(fallback_final_text),
+                        },
+                    )
+                yield {"type": "content", "text": fallback_final_text}
+            else:
+                async for chunk in _stream_fast_final_answer(
+                    trace=trace,
+                    final_model=final_model,
+                    question=question,
+                    handoff_payload=handoff_payload,
+                    source_views=tools.source_views,
+                ):
+                    yield {"type": "content", "text": chunk}
+        with trace_step(trace, "ddl_react.experience.flush", {"question": question}) as step:
+            set_step_output(step, tools.flush_sql_experience_candidates(final_status="answered"))
         sql_lineages = _sql_lineages_from_evidence_by_task(getattr(tools, "evidence_by_task", {}) or {})
         openwebui_sources = _openwebui_sources_from_tool_sources(citation_sources)
         if not openwebui_sources:
@@ -350,10 +362,15 @@ async def stream_school_sql_agent_native(
             )
         finish_trace(trace)
     except Exception as exc:
+        context_limit_error = is_context_limit_error(exc)
         with trace_step(trace, "agent_native.error", {"question": question}) as step:
-            set_step_output(step, {"error": str(exc)})
+            set_step_output(step, {"error": str(exc), "context_limit_error": context_limit_error})
         finish_trace(trace)
-        yield {"type": "content", "text": build_upstream_error_text(exc)}
+        if context_limit_error:
+            clarification = build_context_limit_clarification(question)
+            yield {"type": "content", "text": clarification}
+        else:
+            yield {"type": "content", "text": build_upstream_error_text(exc)}
 
 
 def _plan_tool_contract(*, trace: Any, model: Any, question: str, conversation_context: str) -> Any:
@@ -496,6 +513,7 @@ def _agent_native_prompt(
             f"【本轮实际可用工具清单】：{available_tools_text}。",
             "只能根据【本轮实际可用工具清单】判断工具是否可用。清单里有某个工具时，严禁说“当前环境没有该工具/该工具不可用”；如调用失败，应基于工具返回的 error 说明失败原因。清单里没有的工具不能调用，也不要假装调用过。",
             tool_contract_prompt or "【本轮工具合同】：无强制产物；按问题需要选择工具。",
+            "如果用户只是打招呼、闲聊或通用表达，可以直接自然回答；但凡涉及当前学校事实、工作安排、统计、趋势、概况或业务判断，都不能凭常识补写，必须基于工具或当前学校数据证据作答。",
             "系统会在用户问题前提供【当前系统参照时间】、【历史相似 SQL 案例】、【数据库表目录（无详细DDL）】和【用户原始问题】。",
             "如果历史 SQL 与问题高度相似，优先参考它的表选择和聚合思路，但必须根据当前问题修改 WHERE 条件。",
             "入口数据库表目录只是认路地图，不是完整字段清单；第一轮不会内联详细 DDL，不要把目录当作全量数据库上下文。",
@@ -505,9 +523,10 @@ def _agent_native_prompt(
             "低代码 JSONB 子表准则：当 DDL 或字段样例显示明细数据存储在 JSONB/JSON 数组字段中，且用户问题涉及子表内部属性（如星期、负责人、工作内容、项目、地点、截止时间）时，禁止直接手写复杂 JSON 路径或大量 jsonb_to_recordset SQL；第一步调用 inspect_jsonb_recordset 探测内部 key 和 record_schema_suggestion，第二步调用 jsonb_recordset_query 受控打平查询。where 只引用 m. 主表字段和 s. 子表字段，例如 s.\"星期\" = '星期三'。",
             "数据源可能存在一人/一学生/一班级多行展开。回答“有多少教师/学生/班级/人数”时，优先按稳定 ID 去重；没有 ID 时按姓名或名称去重；SQL 应尽量使用 COUNT(DISTINCT ...) 或先查明细后依据工具返回的 distinct_entity_count 作答，不能把 row_count 直接当作人数。",
             "高效原则：优先编写能够一次性获取所需证据的复合 SQL；严禁先查一小块、再无理由抽样、再补查一小块的碎步慢查。只有字段格式不确定、JSON/数组字段、或上一次查询明确报错时，才需要 sample_table_rows。",
-            "工具额度与深度：每一个独立的业务证据方向允许最多 2 次 sql_db_query；遇到多维度概况、趋势、对比、诊断、归因或发展建议时，允许跨业务表补证。不要因为已经查到一张主事实表就急于结束；也不要无目的试探，补查必须服务于明确的证据方向。",
-            "候选表全量遍历与并行核验：ddl_search 返回的 top_k 是候选池，不是只选第一张表的排序答案。学校业务经常存在新旧表、多系统并存、因公/因私拆表、主表/明细表并行。只要候选池里出现多张与当前问题高度相关的表，且你无法百分百确定哪张才是当前在用表，必须同时或连续核验这些候选表：至少比较 count、MAX(业务时间字段/提交时间/审批时间/__instance_time) 和当前时间段命中数。对于本月、本周、本学期等当前时间统计，必须优先采用在当前时间段有活跃更新状态的表；如果一个问题同时涉及因公和因私、学生和教师、主表和明细表等并列表，必须同时查询对应表，严禁只查其中一张就交卷。",
-            "数据迁移与时间断层追查：学校业务系统经常换表、迁移或分阶段停更。如果你用当前系统参照时间在某张候选表中查询当前时间段查出为 0、空结果或明显低于预期，绝对不要直接把 0 当作业务事实交卷。必须先对该表补查一次 MAX(时间字段)，例如最新提交时间、审批时间、业务日期、开始时间或 __instance_time；如果最新时间停留在几周前、上月、去年，说明当前表是历史表或已停更旧表。此时必须重新调用 ddl_search 检索同业务方向候选表，重点查找带新系统、销假、审批、明细、汇总、v_、new、当前年份/学期等语义的表，并优先选择在当前时间段有活跃更新状态的表重新统计。",
+            "证据方向治理：不要重复查询同一证据方向、同一候选表、同一 SQL。每个独立证据方向通常最多 2 次 sql_db_query；若 ddl_search 返回 duplicate_result=true 或大量 known_table_refs，说明当前方向候选池已经重复，不要换词继续检索同一方向，应改用已有表执行 SQL、调用 final_answer_handoff，或说明证据边界。",
+            "允许开启新证据方向：如果用户问题天然包含多个业务维度，或已有查询结果明确暴露新的业务缺口、新表、新字段，可以开启新的证据方向继续查。教师画像可分基础信息、任课/班级、获奖成果、请假考勤、学生评价、作业公示、导师活动等方向；学校运行概况可分德育、教学、后勤、安全、行政、人事等板块。新方向必须能说清它与用户问题或已查证据的关系，不能只是为了继续探索。",
+            "候选表核验：ddl_search 返回的 top_k 是候选池，不是只选第一张表的排序答案。学校业务可能存在新旧表、多系统并存、因公/因私拆表、主表/明细表并行。只对当前证据方向内高度相关且仍有不确定性的候选表做核验，优先比较 count、MAX(业务时间字段/提交时间/审批时间/__instance_time) 和当前时间段命中数。已经核验过或工具标记为 known_table_refs 的表，不要在同一方向重复核验。",
+            "数据迁移与时间断层追查：学校业务系统可能换表、迁移或分阶段停更。如果当前时间段查出为 0、空结果或明显低于预期，先对该表补查一次 MAX(时间字段)。如果确认停留在旧时间段，可以重新 ddl_search 一次寻找新表；若新检索仍返回重复候选或没有新增 current_period 活跃表，就停止扩张并明确说明查到的时间边界。",
             "工具克制：用户没有明确要求图表、图片、PPT、联网搜索或政策依据时，默认禁止调用 chart、generate_image_tool、slide、web_search、official_policy_search，也默认禁止调用 plot；仅通过学校数据库证据和文字闭环回答。用户明确要求图片/视觉图/大屏图且本轮工具清单包含 generate_image_tool 时，应在查到必要数据后自主判断是否调用 generate_image_tool，不能把图片生成改写成纯文字方案来替代。",
             "外部原因例外：如果用户询问病假、发热、流感、呼吸道感染等是否存在季节性或外部公共卫生原因，应先用学校数据库确认校内趋势，再调用 web_search 获取公开公共卫生或流感季节性证据；不要只凭校内 SQL 下因果结论。",
             "动态探路：下一步查什么由你根据工具结果自主决定，禁止在没有证据时盲猜跨业务方向；每一轮只围绕当前证据最支持的下一步推进。",
@@ -961,9 +980,11 @@ def _fast_final_answer_system_prompt() -> str:
         "DataAgent 已经完成查表、查政策、联网或工具分析；你只负责把 handoff JSON 里的证据写成给用户看的最终回答。"
         "只能基于用户问题和 handoff JSON 中的证据作答，不得新增未提供的数据、链接、政策或校内事实。"
         "禁止输出数据库字段名、表名、SQL、工具名、JSON、内部推理过程或“我先查询/我需要查看”等过程性话术。"
-        "回答要恢复 yili-ai-backend 那种校内业务分析风格：结论先行、数据支撑充分、Markdown 分段清楚、必要时用表格。"
+        "回答重点是把数据解释清楚：说明哪些证据支持了哪些判断，哪些地方只能作为线索或仍需核验。"
+        "在证据允许的范围内，要尽量多给明确结论和可执行建议；建议要落到对象、时间、责任或下一步核查动作。"
+        "回答中要保留足够的原始数据呈现，让用户能看到结论来自哪些真实记录；可以用表格、列表或简短摘录，不强制固定格式。"
         "语气要像一位懂学校业务的助手在认真汇报：温暖、清楚、有一点灵动感，可以自然使用少量 Emoji 或颜文字增强可读性，但不要卖萌过度。"
-        "不要机械套模板，但默认要让用户一眼看出：总体判断、关键数据、结构/趋势/异常、建议和证据边界。"
+        "不要机械套模板；如果证据不足，要明确说清事实边界，不要用格式感掩盖证据缺口。"
     )
 
 
@@ -992,11 +1013,14 @@ def _fast_final_answer_style_guide(*, question: str, handoff_payload: dict[str, 
     payload_text = json.dumps(handoff_payload, ensure_ascii=False, default=str)
     combined = f"{q} {views} {payload_text}"
     lines = [
-        "1. 先用1段给出简短结论，直接回答用户问的是什么；可以用一句轻量、自然的开场，但不要空泛寒暄。",
-        "2. 如果有总量、占比、排名、环比、趋势或分布，优先用 Markdown 表格或清晰项目符号呈现，不要压成一整段。",
-        "3. 如果问题是概况/总体情况/趋势/对比，回答应包含：总体判断、关键指标、结构或变化解读、需要关注的点、下一步建议。",
-        "4. 如果证据不完整，最后用一句话说明统计口径或边界；不要把样本、LIMIT 或阶段性数据说成全量。",
-        "5. 可自然使用少量 Emoji 作为段落提示或重点标识，但不要为了活泼牺牲事实严谨性。",
+        "1. 围绕用户真正问的问题作答，不要套固定格式；表达顺序由证据和问题自然决定。",
+        "2. 解释数据如何支撑判断：把关键数字、分布、变化或异常与业务含义对应起来。",
+        "3. 尽量给出多个业务结论：包括总体判断、最突出的变化/集中点、需要关注的对象或风险；每个结论都要能回到 handoff JSON 的证据。",
+        "4. 尽量给出可执行建议：优先写清谁可以做、何时做、核查什么、如何跟进；证据不足时给“下一步核验建议”，不要给确定性处置结论。",
+        "5. 必须呈现关键原始数据或代表性记录，让用户能复核结论依据；可按问题需要使用表格、列表或短摘录，不要求每次都做成表格。",
+        "6. 不能从 handoff JSON 推出的原因、趋势、对象、政策或建议，一律不要补写成事实。",
+        "7. 如果证据不完整，要说明统计口径、样本范围或待核验事项；不要把样本、LIMIT 或阶段性数据说成全量。",
+        "8. 可自然使用少量 Emoji 作为段落提示或重点标识，但不要为了活泼牺牲事实严谨性。",
     ]
     if any(token in combined for token in ["德育", "行规", "扣分", "纪律"]):
         lines.append(
@@ -1008,7 +1032,7 @@ def _fast_final_answer_style_guide(*, question: str, handoff_payload: dict[str, 
         )
     if any(token in combined for token in ["教师", "积分", "成果", "申报", "职称", "荣誉", "述职", "评优"]):
         lines.append(
-            "业务补充：教师发展类要像教师发展中心材料：先概括总量和定位，再按指标/成果层级/级别/等第/积分贡献分层，必要时列代表性成果表格；政策不足时写待核验。"
+            "业务补充：教师发展类要解释成果、积分、级别、等第等数据对判断的支撑；政策不足时写待核验，不要补全不存在的条件或结论。"
         )
     if any(token in combined for token in ["政策", "官网", "通知", "链接", "引用来源"]):
         lines.append(
